@@ -1,0 +1,41 @@
+name: RSS to Telegram Bot Automation
+
+on:
+  schedule:
+    # প্রতি ১০ মিনিট পর পর স্বয়ংক্রিয়ভাবে চলবে
+    - cron: '*/10 * * * *'
+  workflow_dispatch: # ম্যানুয়ালি টেস্ট করার বাটন
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Setup Python
+      uses: actions/python-version@v4
+      with:
+        python-version: '3.x'
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run Script
+      env:
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        CHAT_ID: ${{ secrets.CHAT_ID }}
+      run: python bot.py
+
+    - name: Save History
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git add sent_links.txt
+        git commit -m "Update sent news history" || exit 0
+        git push
