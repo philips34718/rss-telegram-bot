@@ -10,6 +10,8 @@ import google.generativeai as genai
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
+
+# আপনার দেওয়া API Key এখানে ডিফল্ট হিসেবে বসানো হলো
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or "AQ.Ab8RN6Ikq7g5wQLWLQEv1gejtj9raWkk7PPgQjSPim08FF3GFw"
 
 if GEMINI_API_KEY:
@@ -47,7 +49,6 @@ def cleanup_old_telegram_messages(data):
         if current_time - item.get("timestamp", 0) > retention_period:
             msg_id = item.get("message_id")
             if msg_id:
-                url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
                 delete_url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage"
                 try:
                     requests.post(delete_url, json={"chat_id": CHAT_ID, "message_id": msg_id}, timeout=5)
@@ -60,40 +61,49 @@ def cleanup_old_telegram_messages(data):
     data["telegram_messages"] = remaining_messages
     return data
 
-# লিংকের ট্র্যাকিং প্যারামিটার মুছে লিংক ক্লিন করা (যাতে এক খবর বারবার না আসে)
 def clean_link(raw_url):
     return raw_url.split('?')[0].rstrip('/')
 
 def is_similar(title1, title2, threshold=0.25):
     return SequenceMatcher(None, title1.lower(), title2.lower()).ratio() > threshold
 
-# বাংলা বা ইংরেজি শিরোনামকে ভিডিও ফুটেজের জন্য সঠিক ২-৩টি ইংরেজি কিওয়ার্ডে রূপান্তর
+# খবরটি গত ৪৫ মিনিটের ফ্রেশ খবর কিনা তা পরীক্ষা
+def is_fresh_news(entry, max_age_seconds=2700):  # ৪৫ মিনিট
+    published_parsed = getattr(entry, 'published_parsed', None) or getattr(entry, 'updated_parsed', None)
+    if published_parsed:
+        entry_time = time.mktime(published_parsed)
+        if (time.time() - entry_time) > max_age_seconds:
+            return False
+    return True
+
+# Gemini API দিয়ে খবর থেকে ২টি নির্ভুল ইংরেজি সার্চ শব্দ বের করা
 def get_english_keywords(news_title):
-    if not GEMINI_API_KEY:
-        return "news footage"
+    if GEMINI_API_KEY:
+        try:
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            prompt = (
+                f"Extract 2 to 3 essential ENGLISH search keywords for video stock footage from this news title: \"{news_title}\".\n"
+                f"Rules:\n"
+                f"1. Output ONLY 2-3 English words (e.g., 'Israel Gaza strike' or 'Dhaka protest').\n"
+                f"2. Do NOT write Bengali, explanation, or quotes."
+            )
+            response = model.generate_content(prompt)
+            clean_kw = re.sub(r'[^a-zA-Z0-9\s]', '', response.text).strip()
+            
+            words = clean_kw.split()
+            if len(words) >= 1 and clean_kw.lower() != "news event":
+                return " ".join(words[:3])
+        except Exception as e:
+            print(f"⚠️ Gemini Keyword Error: {e}")
 
-    try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        prompt = (
-            f"Translate the core topic of this news title into 2 to 3 simple ENGLISH search keywords for stock videos.\n"
-            f"News Title: \"{news_title}\"\n\n"
-            f"Rules:\n"
-            f"1. Output ONLY 2-3 English words separated by space (e.g. 'Israel Gaza attack' or 'Dhaka protest').\n"
-            f"2. Do NOT write any Bengali, punctuation, or explanations."
-        )
-        response = model.generate_content(prompt)
-        text = response.text.strip()
-        
-        # ইংরেজি অক্ষর ও স্পেস ছাড়া বাকি সব মুছে নেওয়া
-        clean_kw = re.sub(r'[^a-zA-Z0-9\s]', '', text).strip()
-        if clean_kw and len(clean_kw) >= 3:
-            return clean_kw
-    except Exception as e:
-        print(f"⚠️ Keyword Extraction Error: {e}")
+    # ব্যাকআপ: শিরোনামে ইংরেজি শব্দ থাকলে তা তুলে নেওয়া
+    eng_words = re.findall(r'[a-zA-Z0-9]+', news_title)
+    if len(eng_words) >= 2:
+        return " ".join(eng_words[:3])
 
-    return "news event"
+    return "breaking news"
 
-# ১টি সোর্সে আসা খবরটি ভিডিও তৈরি করার মতো গুরুত্বপূর্ণ কি না তা পরীক্ষা করা
+# ১টি সোর্সে আসা খবর ভিডিও বানানোর উপযোগী কি না যাচাই
 def is_potential_video_story(news_title):
     if not GEMINI_API_KEY:
         return True
@@ -101,9 +111,9 @@ def is_potential_video_story(news_title):
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
         prompt = (
-            f"Is this news headline important, breaking, or visually exciting enough to make a short VIDEO story?\n"
+            f"Is this news headline visually compelling or important enough to make a short YouTube news story?\n"
             f"Headline: \"{news_title}\"\n\n"
-            f"Answer strictly with 'YES' or 'NO'."
+            f"Answer strictly 'YES' or 'NO'."
         )
         response = model.generate_content(prompt)
         return "YES" in response.text.strip().upper()
@@ -114,10 +124,9 @@ def is_potential_video_story(news_title):
 def send_telegram_message(title, link, sources_str, search_query):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     
-    # ইউআরএল এনকোডিং (Envato ও Google-এ স্পেসজনিত ভুল লিংক ফিক্সিং)
+    # URL সঠিকভাবে এনকোড করা (স্পেস ও বিশেষ চিহ্নের লিংক ভাঙা রোধ করতে)
     encoded_kw = urllib.parse.quote(search_query)
     
-    # ChatGPT প্রেজেন্টার স্ক্রিপ্ট লিংক
     script_prompt = (
         f"আপনি একজন নিউজ চ্যানেলের প্রডিউসার। এই খবরের ওপর একটি ১১০ শব্দের আকর্ষণীয় "
         f"বাংলা প্রেজেন্টার ভয়েসওভার স্ক্রিপ্ট, হাই-সিটিআর ইউটিউব শিরোনাম এবং ৩টি হ্যাশট্যাগসহ "
@@ -179,7 +188,10 @@ def main():
     for source_name, feed_url in RSS_FEEDS.items():
         try:
             feed = feedparser.parse(feed_url)
-            for entry in feed.entries[:8]:
+            for entry in feed.entries[:10]:
+                if not is_fresh_news(entry, max_age_seconds=2700):
+                    continue
+
                 cleaned_url = clean_link(entry.link)
                 all_articles.append({
                     "source": source_name,
@@ -189,16 +201,14 @@ def main():
         except Exception as e:
             print(f"⚠️ Error fetching {source_name}: {e}")
 
-    print(f"ℹ️ Total fetched articles: {len(all_articles)}")
+    print(f"ℹ️ Fresh articles found in last 45 mins: {len(all_articles)}")
 
     for i in range(len(all_articles)):
         item_a = all_articles[i]
         
-        # ১. লিংক মিলিয়ে পুরোনো খবর বাদ দেওয়া
         if item_a["link"] in sent_links_set:
             continue
 
-        # ২. শিরোনামের মিল দেখে আগের পাঠানো খবর ফিল্টার করা
         already_sent = False
         for past_title in sent_titles_list:
             if is_similar(item_a["title"], past_title, threshold=0.50):
@@ -207,7 +217,6 @@ def main():
         if already_sent:
             continue
 
-        # সোর্স মিলিয়ে দেখা (কয়টি সাইটে এসেছে)
         matched_sources = {item_a["source"]}
         for j in range(i + 1, len(all_articles)):
             item_b = all_articles[j]
@@ -217,8 +226,6 @@ def main():
         source_count = len(matched_sources)
         sources_str = ", ".join(matched_sources)
 
-        # কন্ডিশন ১: অন্তত ২টি সোর্সে প্রকাশিত
-        # কন্ডিশন ২: ১টি সোর্সে আসলেও ভিডিওর জন্য গুরুত্বপূর্ণ
         should_send = False
         if source_count >= 2:
             should_send = True
@@ -226,20 +233,17 @@ def main():
             should_send = is_potential_video_story(item_a['title'])
 
         if should_send:
-            # সঠিক ইংরেজি কিওয়ার্ড বের করা
             keywords = get_english_keywords(item_a['title'])
             print(f"🎯 Processing Story ({sources_str}): {item_a['title']} | KW: {keywords}")
             
             msg_id = send_telegram_message(item_a['title'], item_a['link'], sources_str, keywords)
             
             if msg_id:
-                # স্থায়ীভাবে ডাটাবেজে জমা রাখা (যাতে ভবিষ্যতে কখনোই ২বার না আসে)
                 data["sent_links"].append(item_a["link"])
                 data["sent_titles"].append(item_a["title"])
                 sent_links_set.add(item_a["link"])
                 sent_titles_list.append(item_a["title"])
                 
-                # ৬ ঘণ্টা পর টেলিগ্রাম মেসেজ মুছে দেওয়ার জন্য ট্র্যাকিং
                 data["telegram_messages"].append({
                     "message_id": msg_id,
                     "timestamp": time.time()
