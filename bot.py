@@ -1,4 +1,5 @@
 import os
+import re
 import feedparser
 import requests
 import urllib.parse
@@ -7,7 +8,7 @@ import google.generativeai as genai
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_API_KEY = os.environ.get("AQ.Ab8RN6Ikq7g5wQLWLQEv1gejtj9raWkk7PPgQjSPim08FF3GFw")
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -31,23 +32,29 @@ def save_sent_link(link):
     with open(SENT_LOG_FILE, "a", encoding="utf-8") as f:
         f.write(f"{link}\n")
 
+# ব্যাকআপ কিওয়ার্ড এক্সট্রাক্টর (AI ব্যর্থ হলেও কাজ করবে)
+def extract_fallback_keywords(title):
+    clean_text = re.sub(r'[^\w\s]', '', title)
+    words = clean_text.split()
+    return " ".join(words[:4]) if words else "news footage"
+
 # Gemini দিয়ে বাংলা স্ক্রিপ্ট এবং ইংরেজি সার্চ কিওয়ার্ড তৈরি
 def generate_script_and_keywords(news_title):
+    fallback_kw = extract_fallback_keywords(news_title)
+    
     if not GEMINI_API_KEY:
         print("⚠️ GEMINI_API_KEY missing.")
-        return "⚠️ এআই স্ক্রিপ্ট জেনারেট করা যায়নি।", news_title
+        return "⚠️ এআই স্ক্রিপ্ট জেনারেট করা যায়নি (API Key অনুপস্থিত)।", fallback_kw
     
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
         prompt = f"""
-        You are a news production assistant. Analyze this news title:
-        "{news_title}"
+        Analyze this news title: "{news_title}"
 
-        Tasks:
-        1. Write an engaging 80-100 word Bengali news script for a video broadcast.
-        2. Extract 2-4 primary ENGLISH search keywords suitable for finding footage/images on Reuters or Envato (even if the title is in Bengali).
+        Task 1: Write an engaging 80-100 word news script in Bengali.
+        Task 2: Extract 2-3 essential ENGLISH search keywords for video stock footage search.
 
-        Output Format EXACTLY like this:
+        Output Format EXACTLY as:
         SCRIPT: <Bengali Script>
         KEYWORDS: <English Keywords>
         """
@@ -55,23 +62,26 @@ def generate_script_and_keywords(news_title):
         text = response.text.strip()
         
         script = "⚠️ স্ক্রিপ্ট তৈরি করতে সমস্যা হয়েছে।"
-        keywords = news_title
+        keywords = fallback_kw
         
         if "SCRIPT:" in text and "KEYWORDS:" in text:
             parts = text.split("KEYWORDS:")
             script = parts[0].replace("SCRIPT:", "").strip()
             keywords = parts[1].strip()
-        else:
+        elif text:
             script = text
 
         return script, keywords
     except Exception as e:
         print(f"❌ Gemini API Error: {e}")
-        return "⚠️ স্ক্রিপ্ট জেনারেট করতে সমস্যা হয়েছে।", news_title
+        return "⚠️ স্ক্রিপ্ট জেনারেট করতে সমস্যা হয়েছে।", fallback_kw
 
 def send_telegram_message(text, search_query):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    encoded_query = urllib.parse.quote_plus(search_query)
+    
+    # ইউআরএল ফিক্স ও স্পেশাল ক্যারেক্টার ফিল্টার
+    clean_kw = re.sub(r'[^\w\s]', '', search_query).strip()
+    encoded_query = urllib.parse.quote(clean_kw)
     
     keyboard = {
         "inline_keyboard": [
@@ -89,7 +99,7 @@ def send_telegram_message(text, search_query):
     payload = {
         "chat_id": CHAT_ID,
         "text": text,
-        "disable_web_page_preview": True,
+        "disable_web_page_preview": False,  # প্রিভিউ আবার অন করা হলো
         "reply_markup": keyboard
     }
     
@@ -138,7 +148,6 @@ def main():
             if item_a["source"] != item_b["source"] and is_similar(item_a["title"], item_b["title"]):
                 matched_sources.add(item_b["source"])
 
-        # অন্তত ২টি সোর্সে মিল থাকলে অথবা ব্রেকিং নিউজের ক্ষেত্রে মেসেজ পাঠাবে
         if len(matched_sources) >= 2:
             match_found = True
             sources_str = ", ".join(matched_sources)
