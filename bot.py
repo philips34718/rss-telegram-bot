@@ -11,10 +11,10 @@ import google.generativeai as genai
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-# নতুন API Key আপডেট করা হয়েছে
+# সঠিক Gemini API Key (অবশ্যই AIzaSy... দিয়ে শুরু হওয়া Key দিবেন)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or "AQ.Ab8RN6JRevJ2C7EiSTWkT63s4HjuZ1U_xSXCI797f8Q92xCxgQ"
 
-if GEMINI_API_KEY:
+if GEMINI_API_KEY and GEMINI_API_KEY.startswith("AIzaSy"):
     try:
         genai.configure(api_key=GEMINI_API_KEY)
     except Exception as e:
@@ -29,6 +29,13 @@ RSS_FEEDS = {
 
 DATA_FILE = "bot_data.json"
 
+# লিঙ্ক সার্চের সময় বাদ দেওয়ার জন্য ইংরেজি অপ্রয়োজনীয় শব্দসমূহ
+STOPWORDS = {
+    'how', 'is', 'are', 'was', 'were', 'the', 'a', 'an', 'in', 'of', 'to', 
+    'for', 'and', 'with', 'on', 'at', 'this', 'that', 'from', 'by', 'what', 
+    'why', 'news', 'breaking', 'story', 'update', 'latest'
+}
+
 def load_data():
     if os.path.exists(DATA_FILE):
         try:
@@ -42,10 +49,10 @@ def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# ৬ ঘণ্টার পুরোনো মেসেজ অটো ডিলিট
+# ৬ ঘণ্টার পুরোনো মেসেজ টেলিগ্রাম থেকে ডিলিট
 def cleanup_old_telegram_messages(data):
     current_time = time.time()
-    retention_period = 6 * 3600  # 6 Hours
+    retention_period = 6 * 3600
     remaining_messages = []
     
     for item in data.get("telegram_messages", []):
@@ -70,38 +77,40 @@ def clean_link(raw_url):
 def is_similar_text(str1, str2, threshold=0.40):
     return SequenceMatcher(None, str1.lower(), str2.lower()).ratio() > threshold
 
-# Gemini দিয়ে বাংলা/ইংরেজি যেকোনো শিরোনাম থেকে ২-৩টি নিখুঁত ইংরেজি সার্চ কিওয়ার্ড তৈরি
+# স্মার্ট কিওয়ার্ড জেনারেটর (Gemini + ফিল্টার স্মার্ট ব্যাকআপ)
 def get_english_keywords(news_title):
-    if GEMINI_API_KEY:
+    # ১. Gemini API চেষ্টা করা (যদি সঠিক Key থাকে)
+    if GEMINI_API_KEY and GEMINI_API_KEY.startswith("AIzaSy"):
         try:
             model = genai.GenerativeModel("gemini-1.5-flash")
             prompt = (
-                f"Translate the main subject of this news title into 2 to 3 ENGLISH search keywords for video stock footage.\n"
-                f"Headline: \"{news_title}\"\n\n"
-                f"Strict Rules:\n"
-                f"1. Output ONLY 2-3 English words (e.g. 'Gaza strike', 'Dhaka protest', 'Trump speech').\n"
-                f"2. Do NOT output Bengali words, explanations, or quotes."
+                f"Extract 2 to 3 main search NOUN keywords (in English) for stock video footage from this news title: \"{news_title}\".\n"
+                f"Do NOT include filler words like 'how', 'is', 'a', 'the', 'news'.\n"
+                f"Return ONLY 2-3 English keywords separated by single space. Example: 'Gaza attack' or 'Dhaka protest'."
             )
             response = model.generate_content(prompt)
             clean_kw = re.sub(r'[^a-zA-Z0-9\s]', '', response.text).strip()
             
-            words = clean_kw.split()
-            if len(words) >= 1:
+            words = [w for w in clean_kw.split() if w.lower() not in STOPWORDS]
+            if words:
                 return " ".join(words[:3])
         except Exception as e:
             print(f"❌ Gemini Keyword Error: {e}")
 
-    # ব্যাকআপ পদ্ধতি: শিরোনামে ইংরেজি থাকলে তা ব্যবহার করবে
-    eng_words = re.findall(r'[a-zA-Z0-9]+', news_title)
+    # ২. স্মার্ট ব্যাকআপ (ফালতু শব্দ বাদ দিয়ে মূল কাজি ইংরেজি শব্দ সংগ্রহ)
+    eng_words = [w for w in re.findall(r'[a-zA-Z0-9]+', news_title) if w.lower() not in STOPWORDS]
     if len(eng_words) >= 2:
         return " ".join(eng_words[:3])
 
-    return "news story"
+    # ৩. সম্পূর্ণ বাংলা খবরের জন্য ব্যাকআপ
+    return "world event"
 
 def send_telegram_message(title, link, sources_str, search_query):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     
-    encoded_kw = urllib.parse.quote(search_query)
+    # ইউআরএল ফিক্স (স্পেস ও ফালতু ফরম্যাটিং পুরোপুরি রিমুভ করা)
+    clean_query = " ".join(search_query.split())
+    encoded_kw = urllib.parse.quote(clean_query)
     
     script_prompt = (
         f"আপনি একজন নিউজ চ্যানেলের প্রডিউসার। এই খবরের ওপর একটি ১১০ শব্দের আকর্ষণীয় "
@@ -130,7 +139,7 @@ def send_telegram_message(title, link, sources_str, search_query):
         f"🚨 **NEW VIDEO STORY ALERT** ({sources_str})\n\n"
         f"📰 **শিরোনাম:** {title}\n"
         f"🔗 **মূল খবর:** {link}\n\n"
-        f"🔑 **ফুটেজ সার্চ ট্যাগ:** `{search_query}`\n"
+        f"🔑 **ফুটেজ সার্চ ট্যাগ:** `{clean_query}`\n"
         f"💡 *টিপস: ভিডিও বানাতে চাইলে নিচের 'প্রেজেন্টার স্ক্রিপ্ট' বাটনে চাপ দিন।*"
     )
     
@@ -164,7 +173,7 @@ def main():
     for source_name, feed_url in RSS_FEEDS.items():
         try:
             feed = feedparser.parse(feed_url)
-            for entry in feed.entries[:6]:  # প্রতি ফিড থেকে সেরা ৬টি তাজা খবর
+            for entry in feed.entries[:6]:
                 cleaned_url = clean_link(entry.link)
                 all_articles.append({
                     "source": source_name,
@@ -179,14 +188,11 @@ def main():
     for i in range(len(all_articles)):
         item_a = all_articles[i]
         
-        # ১. ডিরেক্ট লিঙ্ক চেক (একই লিঙ্ক ডুপ্লিকেট বন্ধ)
         if item_a["link"] in sent_links_set:
             continue
 
-        # ২. কিওয়ার্ড তৈরি করা
         keywords = get_english_keywords(item_a['title'])
 
-        # ৩. কিওয়ার্ডের মাধ্যমে বাংলা-ইংরেজি ডুপ্লিকেট খবর ফিল্টার করা
         already_sent = False
         for past_kw in sent_keywords_list:
             if is_similar_text(keywords, past_kw, threshold=0.50):
@@ -197,7 +203,6 @@ def main():
             print(f"⏭️ Skipping Duplicate Topic: {item_a['title']} ({keywords})")
             continue
 
-        # সোর্স কাউন্ট দেখা (একই খবর কত জায়গায় আছে)
         matched_sources = {item_a["source"]}
         for j in range(i + 1, len(all_articles)):
             item_b = all_articles[j]
