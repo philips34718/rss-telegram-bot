@@ -22,28 +22,28 @@ RSS_FEEDS = {
     "CNN": "http://rss.cnn.com/rss/edition.rss"
 }
 
-HISTORY_FILE = "sent_history.json"
+DATA_FILE = "bot_data.json"
 
-def get_sent_history():
-    if os.path.exists(HISTORY_FILE):
+def load_data():
+    if os.path.exists(DATA_FILE):
         try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
-            return []
-    return []
+            pass
+    return {"sent_links": [], "telegram_messages": []}
 
-def save_sent_history(history):
-    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(history, f, ensure_ascii=False, indent=2)
+def save_data(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-# ৬ ঘণ্টার পুরোনো মেসেজ টেলিগ্রাম থেকে মুছে ফেলার ফাংশন
-def cleanup_old_messages(history):
+# ৬ ঘণ্টার পুরোনো টেলিগ্রাম মেসেজ অটো ডিলিট ফাংশন
+def cleanup_old_telegram_messages(data):
     current_time = time.time()
-    retention_period = 6 * 3600  # 6 Hours
-    updated_history = []
+    retention_period = 6 * 3600  # ৬ ঘণ্টা
+    remaining_messages = []
     
-    for item in history:
+    for item in data.get("telegram_messages", []):
         if current_time - item.get("timestamp", 0) > retention_period:
             msg_id = item.get("message_id")
             if msg_id:
@@ -51,12 +51,13 @@ def cleanup_old_messages(history):
                 try:
                     requests.post(url, json={"chat_id": CHAT_ID, "message_id": msg_id}, timeout=5)
                     print(f"🗑️ Deleted 6h old message (ID: {msg_id})")
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"⚠️ Failed to delete message {msg_id}: {e}")
         else:
-            updated_history.append(item)
+            remaining_messages.append(item)
             
-    return updated_history
+    data["telegram_messages"] = remaining_messages
+    return data
 
 def extract_fallback_keywords(title):
     english_words = re.findall(r'[a-zA-Z0-9]+', title)
@@ -64,30 +65,61 @@ def extract_fallback_keywords(title):
         return " ".join(english_words[:4])
     return "breaking news footage"
 
-# বাংলা শিরোনাম থেকে প্রাসঙ্গিক ইংরেজি কিওয়ার্ড বের করার ফাংশন
-def get_english_keywords(news_title):
+# Gemini দিয়ে খবর পটেনশিয়াল কিনা যাচাই এবং ইংরেজি কিওয়ার্ড এক্সট্র্যাক্ট
+def evaluate_news_and_get_keywords(news_title, source_count):
+    fallback_kw = extract_fallback_keywords(news_title)
+    
+    # একাধিক সোর্সে থাকলে সরাসরি পটেনশিয়াল
+    if source_count >= 2:
+        is_potential = True
+    else:
+        is_potential = False
+
     if not GEMINI_API_KEY:
-        return extract_fallback_keywords(news_title)
-        
+        return is_potential, fallback_kw
+
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
-        prompt = f"Extract 2-3 accurate ENGLISH search keywords for video stock footage from this news title (can be Bengali or English): '{news_title}'. Output ONLY the English keywords, nothing else."
-        response = model.generate_content(prompt)
-        keywords = response.text.strip()
         
-        # কোনো কারণে বাংলা বা অতিরিক্ত চিহ্ন আসলে পরিষ্কার করা
-        clean_kw = re.sub(r'[^a-zA-Z0-9\s]', '', keywords).strip()
-        return clean_kw if clean_kw else extract_fallback_keywords(news_title)
-    except Exception as e:
-        print(f"⚠️ Keyword Extraction Error: {e}")
-        return extract_fallback_keywords(news_title)
+        prompt = f"""
+        Analyze this news headline: "{news_title}"
 
-def send_telegram_message(title, link, source, search_query):
+        Task 1: Is this headline visually compelling, high-impact, or breaking enough to make a good VIDEO STORY for YouTube/Social Media? Answer strictly YES or NO.
+        Task 2: Extract 2-3 essential ENGLISH stock footage search keywords for this news (e.g. "Israel Gaza strike" or "Dhaka protest").
+
+        Output EXACT format:
+        POTENTIAL: <YES/NO>
+        KEYWORDS: <English Keywords>
+        """
+        
+        response = model.generate_content(prompt)
+        text = response.text.strip()
+        
+        keywords = fallback_kw
+        for line in text.split("\n"):
+            if line.startswith("POTENTIAL:") and source_count < 2:
+                is_potential = "YES" in line.upper()
+            elif line.startswith("KEYWORDS:"):
+                extracted_kw = line.replace("KEYWORDS:", "").strip()
+                clean_kw = re.sub(r'[^a-zA-Z0-9\s]', '', extracted_kw).strip()
+                if clean_kw:
+                    keywords = clean_kw
+
+        return is_potential, keywords
+
+    except Exception as e:
+        print(f"⚠️ Gemini Evaluation Error: {e}")
+        return is_potential, fallback_kw
+
+def send_telegram_message(title, link, sources_str, search_query):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     
-    encoded_query = urllib.parse.quote(search_query)
+    # ইউআরএল ফিক্সিং (স্পেস ও স্পেশাল ক্যারেক্টার এনকোড করা)
+    clean_kw = re.sub(r'[^a-zA-Z0-9\s]', '', search_query).strip() or "news footage"
+    encoded_path = urllib.parse.quote(clean_kw)
+    encoded_param = urllib.parse.quote_plus(clean_kw)
     
-    # AI প্রম্পট যা বাটনে ক্লিক করলেই প্রেজেন্টার স্ক্রিপ্ট জেনারেট করবে
+    # ChatGPT প্রম্পট লিংক
     script_prompt = (
         f"আপনি একজন নিউজ চ্যানেলের প্রডিউসার। এই খবরের ওপর একটি ১১০ শব্দের আকর্ষণীয় "
         f"বাংলা প্রেজেন্টার ভয়েসওভার স্ক্রিপ্ট, হাই-সিটিআর ইউটিউব শিরোনাম এবং ৩টি হ্যাশট্যাগসহ "
@@ -101,21 +133,21 @@ def send_telegram_message(title, link, source, search_query):
                 {"text": "🎙️ ১-ক্লিকে প্রেজেন্টার স্ক্রিপ্ট বানান (ChatGPT)", "url": f"https://chatgpt.com/?q={encoded_script_prompt}"}
             ],
             [
-                {"text": f"🖼️ Google Images ({search_query})", "url": f"https://www.google.com/search?tbm=isch&q={encoded_query}"},
-                {"text": "🎬 Envato Elements", "url": f"https://elements.envato.com/all-items/{encoded_query}"}
+                {"text": f"🖼️ Google Images", "url": f"https://www.google.com/search?tbm=isch&q={encoded_param}"},
+                {"text": "🎬 Envato Elements", "url": f"https://elements.envato.com/all-items/{encoded_path}"}
             ],
             [
-                {"text": "📰 Reuters Footage", "url": f"https://www.reuters.com/site-search/?query={encoded_query}"},
-                {"text": "🎥 Pexels Stock", "url": f"https://www.pexels.com/search/{encoded_query}/"}
+                {"text": "📰 Reuters Footage", "url": f"https://www.reuters.com/site-search/?query={encoded_param}"},
+                {"text": "🎥 Pexels Stock", "url": f"https://www.pexels.com/search/{encoded_path}/"}
             ]
         ]
     }
     
     message = (
-        f"🚨 **NEW VIDEO STORY ALERT** ({source})\n\n"
+        f"🚨 **NEW VIDEO STORY ALERT** ({sources_str})\n\n"
         f"📰 **শিরোনাম:** {title}\n"
         f"🔗 **মূল খবর:** {link}\n\n"
-        f"🔑 **ফুটেজ সার্চ ট্যাগ:** `{search_query}`\n"
+        f"🔑 **ফুটেজ ট্যাগ:** `{clean_kw}`\n"
         f"💡 *টিপস: ভিডিও বানাতে চাইলে নিচের 'প্রেজেন্টার স্ক্রিপ্ট' বাটনে চাপ দিন।*"
     )
     
@@ -130,16 +162,21 @@ def send_telegram_message(title, link, source, search_query):
     res = requests.post(url, json=payload, timeout=10)
     if res.status_code == 200:
         return res.json().get("result", {}).get("message_id")
-    return None
+    else:
+        print(f"❌ Telegram Send Error: {res.text}")
+        return None
+
+def is_similar(title1, title2):
+    return SequenceMatcher(None, title1.lower(), title2.lower()).ratio() > 0.25
 
 def main():
     if not BOT_TOKEN or not CHAT_ID:
         print("❌ Bot Token or Chat ID Missing!")
         return
 
-    history = get_sent_history()
-    history = cleanup_old_messages(history)
-    sent_links = {item["link"] for item in history}
+    data = load_data()
+    data = cleanup_old_telegram_messages(data)
+    sent_links_set = set(data.get("sent_links", []))
     
     all_articles = []
     for source_name, feed_url in RSS_FEEDS.items():
@@ -156,25 +193,44 @@ def main():
 
     print(f"ℹ️ Total fetched articles: {len(all_articles)}")
 
-    for item in all_articles:
-        if item["link"] in sent_links:
+    for i in range(len(all_articles)):
+        item_a = all_articles[i]
+        
+        # পূর্বে পাঠানো খবর হলে বাদ যাবে
+        if item_a["link"] in sent_links_set:
             continue
 
-        # সঠিক ইংরেজি সার্চ কিওয়ার্ড বের করা
-        keywords = get_english_keywords(item['title'])
-        print(f"🎯 Sending News ({item['source']}): {item['title']} | Keywords: {keywords}")
-        
-        msg_id = send_telegram_message(item['title'], item['link'], item['source'], keywords)
-        
-        if msg_id:
-            history.append({
-                "link": item["link"],
-                "message_id": msg_id,
-                "timestamp": time.time()
-            })
-            sent_links.add(item["link"])
+        matched_sources = {item_a["source"]}
+        for j in range(i + 1, len(all_articles)):
+            item_b = all_articles[j]
+            if item_a["source"] != item_b["source"] and is_similar(item_a["title"], item_b["title"]):
+                matched_sources.add(item_b["source"])
 
-    save_sent_history(history)
+        source_count = len(matched_sources)
+        sources_str = ", ".join(matched_sources)
+
+        # ২ টি শর্ত যাচাই:
+        # ১. অন্তত ২টি সোর্সে প্রকাশিত খবর
+        # ২. বা ১টি সোর্সে হলেও Gemini দ্বারা ভিডিও স্টোরির জন্য অনুমোদিত খবর
+        is_potential, keywords = evaluate_news_and_get_keywords(item_a['title'], source_count)
+
+        if is_potential:
+            print(f"🎯 Sending Story ({sources_str}): {item_a['title']} | KW: {keywords}")
+            
+            msg_id = send_telegram_message(item_a['title'], item_a['link'], sources_str, keywords)
+            
+            if msg_id:
+                # স্থায়ীভাবে লিঙ্ক সেভ রাখা (যাতে ৬ ঘণ্টা পর মেসেজ ডিলিট হলেও খবর পুনরায় না আসে)
+                data["sent_links"].append(item_a["link"])
+                sent_links_set.add(item_a["link"])
+                
+                # ৬ ঘণ্টা পর ডিলিট করার জন্য মেসেজ ট্র্যাকিং
+                data["telegram_messages"].append({
+                    "message_id": msg_id,
+                    "timestamp": time.time()
+                })
+
+    save_data(data)
 
 if __name__ == "__main__":
     main()
