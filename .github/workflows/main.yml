@@ -1,41 +1,58 @@
-name: RSS to Telegram Bot Automation
+name: News Bot — দিনে ১০ বার
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
-  workflow_dispatch:
+    # UTC সময়ে — বাংলাদেশ UTC+6, তাই 6 বিয়োগ করো
+    # বাংলাদেশ: সকাল ৬টা, ৮টা, ১০টা, দুপুর ১২টা, বিকাল ২টা,
+    #            ৪টা, সন্ধ্যা ৬টা, রাত ৮টা, ১০টা, ১২টা
+    - cron: '0 0 * * *'   # BD: রাত ৬টা
+    - cron: '0 2 * * *'   # BD: সকাল ৮টা
+    - cron: '0 4 * * *'   # BD: সকাল ১০টা
+    - cron: '0 6 * * *'   # BD: দুপুর ১২টা
+    - cron: '0 8 * * *'   # BD: বিকাল ২টা
+    - cron: '0 10 * * *'  # BD: বিকাল ৪টা
+    - cron: '0 12 * * *'  # BD: সন্ধ্যা ৬টা
+    - cron: '0 14 * * *'  # BD: রাত ৮টা
+    - cron: '0 16 * * *'  # BD: রাত ১০টা
+    - cron: '0 18 * * *'  # BD: রাত ১২টা
+  workflow_dispatch:       # হাতে চালাতে চাইলে GitHub UI থেকে Run
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v3
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-    - name: Setup Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.x'
+      # ── bot_data.json ক্যাশ থেকে রিস্টোর করো ──────────────────────────────
+      - name: Restore bot data cache
+        uses: actions/cache@v4
+        with:
+          path: bot_data.json
+          key: bot-data-${{ github.run_id }}
+          restore-keys: |
+            bot-data-
 
-    - name: Install Dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-    - name: Run Script
-      env:
-        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-        CHAT_ID: ${{ secrets.CHAT_ID }}
-        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      run: python bot.py
+      - name: Install dependencies
+        run: |
+          pip install feedparser requests google-generativeai
 
-    - name: Save History
-      run: |
-        git config --global user.name "github-actions[bot]"
-        git config --global user.email "github-actions[bot]@users.noreply.github.com"
-        git add sent_links.txt
-        git commit -m "Update sent news history" || exit 0
-        git push
+      - name: Run news bot
+        env:
+          BOT_TOKEN:      ${{ secrets.BOT_TOKEN }}
+          CHAT_ID:        ${{ secrets.CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python news_bot.py
+
+      # ── আপডেট হওয়া bot_data.json সেভ করো ──────────────────────────────────
+      - name: Save bot data cache
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: bot_data.json
+          key: bot-data-${{ github.run_id }}
