@@ -47,7 +47,7 @@ jobs:
           BOT_TOKEN:      ${{ secrets.BOT_TOKEN }}
           CHAT_ID:        ${{ secrets.CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python news_bot.py
+        run: python bot.py
 
       # ── আপডেট হওয়া bot_data.json সেভ করো ──────────────────────────────────
       - name: Save bot data cache
