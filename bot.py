@@ -13,14 +13,14 @@ import google.generativeai as genai
 # ═══════════════════════════════ কনফিগারেশন ══════════════════════════════════
 BOT_TOKEN      = os.environ.get("BOT_TOKEN")
 CHAT_ID        = os.environ.get("CHAT_ID")
-GEMINI_API_KEY = os.environ.get("AQ.Ab8RN6KARdiKbw1feh0rQalEL93jK2ygJDT4fPjIxqBG-oBrSw")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 # ── পোস্টিং লিমিট ─────────────────────────────────────────────────────────
 MAX_POST_PER_RUN     = 7        # প্রতি রানে সর্বোচ্চ পোস্ট
 MIN_POST_PER_RUN     = 5        # প্রতি রানে সর্বনিম্ন চেষ্টা
 RETENTION_HOURS      = 24       # ঘণ্টা পর মেসেজ অটো-ডিলিট
-NEWS_AGE_LIMIT_HOURS = 36       # এর পুরোনো নিউজ বাদ (আগে ছিল ৪৮)
-MAX_ENTRIES_PER_FEED = 15       # প্রতি ফিড থেকে সর্বোচ্চ এন্ট্রি
+NEWS_AGE_LIMIT_HOURS = 10      # এর পুরোনো নিউজ বাদ — ২ঘণ্টা বেশি কম ছিল
+MAX_ENTRIES_PER_FEED = 20       # প্রতি ফিড থেকে সর্বোচ্চ এন্ট্রি
 MAX_SAVED_LINKS      = 2000     # JSON-এ সর্বশেষ এত লিংক রাখা হবে
 MAX_SAVED_TITLES     = 500      # JSON-এ সর্বশেষ এত টাইটেল রাখা হবে
 
@@ -30,8 +30,8 @@ KEYWORD_SIM_THRESHOLD = 0.70    # কীওয়ার্ড মিলের �
 
 # ── ভাইরাল স্কোরিং ──────────────────────────────────────────────────────────
 MULTI_SOURCE_BONUS    = 30      # একাধিক সোর্সে থাকলে স্কোর বোনাস
-FRESHNESS_BONUS_HOURS = 6       # এর মধ্যে প্রকাশিত হলে ফ্রেশনেস বোনাস
-FRESHNESS_BONUS_PTS   = 20      # ফ্রেশনেস বোনাস পয়েন্ট
+FRESHNESS_BONUS_HOURS = 2       # ২ঘণ্টার মধ্যে = সর্বোচ্চ ফ্রেশ
+FRESHNESS_BONUS_PTS   = 60      # ফ্রেশ নিউজ সবার আগে যাবে
 
 POST_DELAY_SEC = 2.0            # পোস্টের মাঝে বিরতি
 
@@ -177,13 +177,17 @@ def is_old_story(entry, url: str) -> bool:
     return False
 
 def freshness_score(entry) -> int:
-    """নিউজ যত তাজা, স্কোর তত বেশি।"""
+    """নিউজ যত তাজা, স্কোর তত বেশি। ২ঘণ্টার মধ্যে = ৬০ পয়েন্ট।"""
     if hasattr(entry, 'published_parsed') and entry.published_parsed:
         try:
             age_hours = (time.time() - time.mktime(entry.published_parsed)) / 3600
-            if age_hours <= FRESHNESS_BONUS_HOURS:
-                return FRESHNESS_BONUS_PTS
-            elif age_hours <= 12:
+            if age_hours <= 2:
+                return 60   # একদম তাজা — সবার আগে যাবে
+            elif age_hours <= 4:
+                return 40
+            elif age_hours <= 6:
+                return 25
+            elif age_hours <= 10:
                 return 10
         except Exception:
             pass
@@ -234,19 +238,24 @@ def get_gemini_analysis(headline: str) -> dict:
     if not GEMINI_API_KEY:
         return default
     try:
-        model  = genai.GenerativeModel("gemini-1.5-flash")
+        model  = genai.GenerativeModel("gemini-2.0-flash")
         prompt = (
-            f"Analyze this news headline and respond ONLY as valid JSON, no markdown:\n"
+            f"You are a senior news editor for a Bangladeshi YouTube channel. "
+            f"Analyze this headline and respond ONLY as valid JSON (no markdown, no explanation):\n"
             f"Headline: \"{headline}\"\n\n"
-            f"Respond with exactly this structure:\n"
+            f"Respond with exactly:\n"
             f"{{\n"
-            f'  "keywords": "2-3 English nouns for stock footage search",\n'
-            f'  "viral_score": <integer 0-100 based on global impact and shareability>,\n'
-            f'  "importance_bn": "এক বাক্যে বাংলায় কেন এই খবর গুরুত্বপূর্ণ"\n'
+            f'  "keywords": "2-3 English nouns best for stock footage search (e.g. \'Gaza protest crowd\')",\n'
+            f'  "viral_score": <integer 0-100>,\n'
+            f'  "importance_bn": "এক বাক্যে বাংলায় দর্শকের জন্য কেন গুরুত্বপূর্ণ"\n'
             f"}}\n\n"
-            f"Rules for keywords: only nouns/proper nouns, no stopwords, space-separated.\n"
-            f"Rules for viral_score: 80-100=breaking/global crisis, 60-79=major event, "
-            f"40-59=important, below 40=routine."
+            f"viral_score rules:\n"
+            f"  90-100 = war, assassination, natural disaster, global emergency\n"
+            f"  70-89  = major political event, economic crisis, viral protest\n"
+            f"  50-69  = important national/international news\n"
+            f"  30-49  = routine updates, sports, culture\n"
+            f"  0-29   = press releases, minor local news\n"
+            f"keywords rules: ONLY nouns/proper nouns, NO verbs/articles/stopwords."
         )
         resp = model.generate_content(prompt)
         raw  = resp.text.strip()
@@ -335,47 +344,64 @@ def send_telegram(item: dict, analysis: dict) -> int | None:
         ]
     }
 
-    # ── মেসেজ বডি ───────────────────────────────────────────────────────────
+    # ── মেসেজ বডি — link টা body তে থাকলে Telegram preview দেখায় ─────────────
     importance_line = f"\n💡 _{escape_md(importance)}_" if importance else ""
 
-    text = (
+    # Telegram: inline_keyboard থাকলে link preview আসে না।
+    # সমাধান: দুটো আলাদা মেসেজ —
+    #   msg1 → শিরোনাম + link (preview আসবে), কোনো keyboard নেই
+    #   msg2 → msg1 এর reply হিসেবে শুধু বাটন
+
+    text_preview = (
         f"{score_emoji} *ভাইরাল স্কোর: {viral_score}/100* | {escape_md(source)}\n"
-        f"{pub_time}\n"
+        f"{pub_time}"
         f"{multi_badge}\n\n"
         f"📰 *শিরোনাম:*\n{safe_title}"
         f"{importance_line}\n\n"
-        f"🔑 *ফুটেজ ট্যাগ:* `{clean_kw}`\n"
-        f"💡 _নিচের বাটন দিয়ে স্ক্রিপ্ট ও ফুটেজ নিন_"
+        f"🔗 {link}\n\n"
+        f"🔑 *ফুটেজ ট্যাগ:* `{clean_kw}`"
     )
 
     api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id":                  CHAT_ID,
-        "text":                     text,
-        "parse_mode":               "Markdown",
-        "disable_web_page_preview": False,
-        "reply_markup":             keyboard,
-    }
-    try:
-        res = requests.post(api_url, json=payload, timeout=10)
-        if res.status_code == 200:
-            return res.json().get("result", {}).get("message_id")
-        # ── parse_mode error হলে plain text এ retry ─────────────────────────
-        if res.status_code == 400 and "parse" in res.text.lower():
-            payload["parse_mode"] = ""
-            payload["text"] = (
-                f"[ভাইরাল স্কোর: {viral_score}/100] {source}\n"
-                f"{pub_time}\n\n"
-                f"{title}\n\n"
-                f"ট্যাগ: {clean_kw}"
-            )
-            res2 = requests.post(api_url, json=payload, timeout=10)
-            if res2.status_code == 200:
-                return res2.json().get("result", {}).get("message_id")
-        print(f"    ⚠️ Telegram {res.status_code}: {res.text[:200]}")
-    except Exception as e:
-        print(f"    ⚠️ Telegram exception: {e}")
-    return None
+
+    # ── মেসেজ ১: preview সহ, কোনো keyboard নেই ─────────────────────────────
+    def _send(text, parse_mode="Markdown", reply_id=None, markup=None):
+        p = {
+            "chat_id":                  CHAT_ID,
+            "text":                     text,
+            "parse_mode":               parse_mode,
+            "disable_web_page_preview": False,
+        }
+        if reply_id:
+            p["reply_to_message_id"] = reply_id
+        if markup:
+            p["reply_markup"]             = markup
+            p["disable_web_page_preview"] = True   # keyboard থাকলে preview বন্ধ
+        try:
+            res = requests.post(api_url, json=p, timeout=10)
+            if res.status_code == 200:
+                return res.json().get("result", {}).get("message_id")
+            if res.status_code == 400 and "parse" in res.text.lower() and parse_mode:
+                # Markdown parse error → plain text retry
+                p["parse_mode"] = ""
+                res2 = requests.post(api_url, json=p, timeout=10)
+                if res2.status_code == 200:
+                    return res2.json().get("result", {}).get("message_id")
+            print(f"    ⚠️ Telegram {res.status_code}: {res.text[:150]}")
+        except Exception as e:
+            print(f"    ⚠️ Telegram exception: {e}")
+        return None
+
+    preview_msg_id = _send(text_preview)
+    if not preview_msg_id:
+        return None
+
+    time.sleep(0.5)
+
+    # ── মেসেজ ২: বাটন, প্রথম মেসেজের reply হিসেবে ──────────────────────────
+    _send("🔽 *স্ক্রিপ্ট ও ফুটেজ টুলস:*", reply_id=preview_msg_id, markup=keyboard)
+
+    return preview_msg_id
 
 # ═══════════════════════ পুরোনো মেসেজ ডিলিট ══════════════════════════════════
 def cleanup_old_messages(data: dict) -> dict:
