@@ -5,7 +5,7 @@ on:
     # UTC সময়ে — বাংলাদেশ UTC+6, তাই 6 বিয়োগ করো
     # বাংলাদেশ: সকাল ৬টা, ৮টা, ১০টা, দুপুর ১২টা, বিকাল ২টা,
     #            ৪টা, সন্ধ্যা ৬টা, রাত ৮টা, ১০টা, ১২টা
-    - cron: '0 0 * * *'   # BD: রাত ৬টা
+    - cron: '0 0 * * *'   # BD: সকাল ৬টা
     - cron: '0 2 * * *'   # BD: সকাল ৮টা
     - cron: '0 4 * * *'   # BD: সকাল ১০টা
     - cron: '0 6 * * *'   # BD: দুপুর ১২টা
@@ -22,11 +22,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # ── bot_data.json ক্যাশ থেকে রিস্টোর করো ──────────────────────────────
       - name: Restore bot data cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: bot_data.json
           key: bot-data-${{ github.run_id }}
@@ -36,7 +36,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.13'
 
       - name: Install dependencies
         run: |
@@ -52,7 +52,7 @@ jobs:
       # ── আপডেট হওয়া bot_data.json সেভ করো ──────────────────────────────────
       - name: Save bot data cache
         if: always()
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: bot_data.json
           key: bot-data-${{ github.run_id }}
