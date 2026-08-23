@@ -1,14 +1,3 @@
-আপনার অনুরোধ অনুযায়ী কোডে ৩টি মূল পরিবর্তন করে সম্পূর্ণ স্ক্রিপ্টটি আপডেট করা হলো:
-
-1. **দিনে ১০ বার চেক (Crawl):** ২৪ ঘণ্টাকে ১০ ভাগে ভাগ করে প্রতি **২ ঘণ্টা ২৪ মিনিট (৮,৬৪০ সেকেন্ড)** পর পর অটোমেটিক ক্রল করার ব্যবস্থার রূপান্তর।
-2. **২৪ ঘণ্টা পর অটো ডিলিট:** ৬ ঘণ্টার পরিবর্তে এখন থেকে **২৪ ঘণ্টা পার হলে** পুরোনো টেলিগ্রাম মেসেজগুলো অটোমেটিক ডিলিট হবে।
-3. **বেস্ট আউটপুট ও ফিল্টারিং:** Gemini API দিয়ে শুধুমাত্র হাই-ভ্যালু ব্রেকিং নিউজ বাছাই এবং ২-৩টি খাঁটি ইংরেজি Noun Keywords এক্সট্রাক্ট করা হবে।
-
----
-
-### সম্পূর্ণ সংশোধনকৃত `bot.py`
-
-```python
 import os
 import re
 import time
@@ -19,7 +8,7 @@ import urllib.parse
 from difflib import SequenceMatcher
 import google.generativeai as genai
 
-# পরিবেশ ভ্যারিয়েবল
+# পরিবেশ ভ্যারিয়োবল
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or "AQ.Ab8RN6Le-AI9X8PTHinSOlMD9OrSDfdxdjWb6FpzISRPDSM6oQ"
@@ -274,5 +263,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-```
