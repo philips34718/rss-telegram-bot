@@ -13,7 +13,7 @@ import google.generativeai as genai
 # ═══════════════════════════════ কনফিগারেশন ══════════════════════════════════
 BOT_TOKEN      = os.environ.get("BOT_TOKEN")
 CHAT_ID        = os.environ.get("CHAT_ID")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_API_KEY = os.environ.get("AQ.Ab8RN6KARdiKbw1feh0rQalEL93jK2ygJDT4fPjIxqBG-oBrSw")
 
 # ── পোস্টিং লিমিট ─────────────────────────────────────────────────────────
 MAX_POST_PER_RUN     = 7        # প্রতি রানে সর্বোচ্চ পোস্ট
