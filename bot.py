@@ -5,14 +5,16 @@ import json
 import feedparser
 import requests
 import urllib.parse
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 import google.generativeai as genai
 
+# পরিবেশ ভ্যারিয়াবেল
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or "AQ.Ab8RN6Le-AI9X8PTHinSOlMD9OrSDfdxdjWb6FpzISRPDSM6oQ"
 
-# GitHub Actions বা Cron-এর জন্য এটি False থাকবে (প্রতি রানে একবার চেক করবে)
+# GitHub Actions-এর জন্য এটি False থাকবে
 RUN_CONTINUOUSLY = False  
 
 # ২৪ ঘণ্টা পর টেলিগ্রাম মেসেজ অটো ডিলিট সময়সীমা
@@ -49,6 +51,10 @@ def load_data():
     return {"sent_links": [], "sent_topics": [], "telegram_messages": []}
 
 def save_data(data):
+    # মেমরি অপটিমাইজেশন (সর্বশেষ ৫০০টি লিংক ও ৫০টি টপিক সেভ রাখবে)
+    data["sent_links"] = data.get("sent_links", [])[-500:]
+    data["sent_topics"] = data.get("sent_topics", [])[-50:]
+    
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -75,8 +81,22 @@ def cleanup_old_telegram_messages(data):
 def clean_url(url):
     return url.split('?')[0].rstrip('/')
 
-def is_similar_text(str1, str2, threshold=0.40):
+def is_similar_text(str1, str2, threshold=0.35):
     return SequenceMatcher(None, str1.lower(), str2.lower()).ratio() > threshold
+
+def is_old_story(entry, link):
+    # ১. ইউআরএলে পুরোনো বছর থাকলে বাতিল
+    old_years = ["/2021/", "/2022/", "/2023/", "/2024/", "/2025/"]
+    if any(year in link for year in old_years):
+        return True
+
+    # ২. পাবলিশ ডেট ৪৮ ঘণ্টার পুরোনো হলে বাতিল
+    if hasattr(entry, 'published_parsed') and entry.published_parsed:
+        pub_time = time.mktime(entry.published_parsed)
+        if (time.time() - pub_time) > (48 * 3600):
+            return True
+            
+    return False
 
 def get_stock_keywords(headline):
     if GEMINI_API_KEY:
@@ -109,23 +129,23 @@ def send_telegram_message(title, link, source_name, keywords):
     clean_kw = " ".join(keywords.split())
     encoded_kw = urllib.parse.quote(clean_kw)
     
-    # স্টুডিও মানের প্রফেশনাল টিভি প্রডিউসার প্রম্পট
+    # প্রফেশনাল স্টুডিও-রেডি স্ক্রিপ্ট প্রম্পট
     script_prompt = (
         f"আপনি একজন আন্তর্জাতিক নিউজ চ্যানেলের এক্সিকিউটিভ প্রডিউসার। "
-        f"নিচের শিরোনাম থেকে নিউজ স্টুডিওর জন্য একটি সচল ও আকর্ষণীয় বাংলা নিউজ প্যাকেজ স্ক্রিপ্ট তৈরি করুন:\n\n"
+        f"নিচের শিরোনাম থেকে নিউজ স্টুডিওর জন্য একটি প্রফেশনাল বাংলা নিউজ প্যাকেজ স্ক্রিপ্ট তৈরি করুন:\n\n"
         f"সংবাদ: \"{title}\"\n\n"
         f"ফরম্যাট নিয়মাবলী:\n"
-        f"১. [ইউটিউব শিরোনাম]: ১টি হাই-সিটিআর আকর্ষণীয় শিরোনাম।\n"
-        f"২. [অ্যাঙ্কর ভূমিকা]: স্টুডিও অ্যাঙ্করের পড়ার জন্য ২০ সেকেন্ডের প্রফেশনাল সূচনা।\n"
-        f"৩. [ভয়েসওভার স্ক্রিপ্ট]: ফুটেজের ব্যাকগ্রাউন্ডে চালানোর জন্য ৯০-১১০ শব্দের তথ্যবহুল ভয়েসওভার। মাঝখানে ব্র্যাকেটে ভিডিও ফুটেজের দিকনির্দেশনা দিন (যেমন: [ফুটেজ: বক্তৃতার দৃশ্য], [গ্রাফিক্স: মূল পয়েন্ট])।\n"
-        f"৪. [আউটরো ও হ্যাশট্যাগ]: চ্যানেল সাবস্ক্রাইব করার সাইন-অফ এবং ৩টি হ্যাশট্যাগ।"
+        f"১. [ইউটিউব শিরোনাম]: ১টি ক্যাচি ও আকর্ষণীয় টাইটেল।\n"
+        f"২. [অ্যাঙ্কর ইনট্রো]: স্টুডিও অ্যাঙ্করের পড়ার জন্য ২০ সেকেন্ডের প্রেজেন্টার ইনট্রো।\n"
+        f"৩. [ভয়েসওভার স্ক্রিপ্ট]: ফুটেজের সাথে মেলানোর জন্য ৯০-১১০ শব্দের ভয়েসওভার। ব্র্যাকেটে ভিডিও বি-রোল নির্দেশ দিন (যেমন: [ফুটেজ: সংবাদের দৃশ্য], [গ্রাফিক্স: পয়েন্ট])।\n"
+        f"৪. [আউটরো ও হ্যাশট্যাগ]: সাইন-অফ এবং ৩টি প্রাসঙ্গিক হ্যাশট্যাগ।"
     )
     encoded_script_prompt = urllib.parse.quote(script_prompt)
     
     keyboard = {
         "inline_keyboard": [
             [
-                {"text": "🎙️ ১-ক্লিকে স্টুডিও ভয়েসওভার স্ক্রিপ্ট (ChatGPT)", "url": f"https://chatgpt.com/?q={encoded_script_prompt}"}
+                {"text": "🎙️ ১-ক্লিকে স্টুডিও স্ক্রিপ্ট বানান (ChatGPT)", "url": f"https://chatgpt.com/?q={encoded_script_prompt}"}
             ],
             [
                 {"text": "🖼️ Google Images", "url": f"https://www.google.com/search?tbm=isch&q={encoded_kw}"},
@@ -143,7 +163,7 @@ def send_telegram_message(title, link, source_name, keywords):
         f"📰 **শিরোনাম:** {title}\n"
         f"🔗 **মূল খবর:** {link}\n\n"
         f"🔑 **ফুটেজ সার্চ ট্যাগ:** `{clean_kw}`\n"
-        f"💡 *টিপস: স্টুডিও স্ক্রিপ্ট পেতে নিচের বাটন ব্যবহার করুন।*"
+        f"💡 *টিপস: স্টুডিও স্ক্রিপ্ট পেতে নিচের বাটন চাপুন।*"
     )
     
     payload = {
@@ -171,33 +191,36 @@ def process_news():
         try:
             feed = feedparser.parse(feed_url)
             for entry in feed.entries[:5]:
-                all_articles.append({
-                    "source": source_name,
-                    "title": entry.title.strip(),
-                    "link": clean_url(entry.link)
-                })
+                clean_l = clean_url(entry.link)
+                if not is_old_story(entry, clean_l):
+                    all_articles.append({
+                        "source": source_name,
+                        "title": entry.title.strip(),
+                        "link": clean_l
+                    })
         except Exception as e:
             print(f"⚠️ Feed error ({source_name}): {e}")
 
     for item_a in all_articles:
-        # ১. ইউআরএল চেক
+        # ১. লিংক ফিল্টার
         if item_a["link"] in sent_links_set:
+            print(f"⏭️ Link Already Sent: {item_a['link']}")
             continue
 
         keywords = get_stock_keywords(item_a['title'])
 
-        # ২. ডুপ্লিকেট কিওয়ার্ড/টপিক ফিল্টার
+        # ২. টপিক ফিল্টার
         already_posted = False
         for past_topic in sent_topics_list:
-            if is_similar_text(keywords, past_topic, threshold=0.40):
+            if is_similar_text(keywords, past_topic, threshold=0.35):
                 already_posted = True
                 break
         
         if already_posted:
-            print(f"⏭️ Duplicate Skipped: {item_a['title']} ({keywords})")
+            print(f"⏭️ Duplicate Topic Skipped: {item_a['title']} ({keywords})")
             continue
 
-        print(f"🎯 New Story ({item_a['source']}): {item_a['title']} | Tag: {keywords}")
+        print(f"🎯 Posting Story ({item_a['source']}): {item_a['title']} | Tag: {keywords}")
         
         msg_id = send_telegram_message(item_a['title'], item_a['link'], item_a['source'], keywords)
         
@@ -219,7 +242,7 @@ def main():
         print("❌ Bot Token or Chat ID is missing!")
         return
 
-    print("🚀 Running News Processing...")
+    print("🚀 Processing Latest News...")
     process_news()
 
 if __name__ == "__main__":
