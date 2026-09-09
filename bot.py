@@ -233,6 +233,105 @@ def content_fingerprint(title: str) -> str:
     key   = " ".join(words[:8])
     return hashlib.md5(key.encode()).hexdigest()
 
+# ═══════════════════════════════ ডুপ্লিকেট ও টপিক এন্টাইটি রুলস ═══════════════════════════════
+BENGALI_STOPWORDS = {
+    "ও", "এবং", "বা", "কিন্তু", "করেছে", "হয়েছে", "হচ্ছে", "হবে", "হয়ে", "করা", "করল",
+    "নিয়ে", "পর", "হতে", "থেকে", "একটি", "নতুন", "সব", "এই", "সেই", "তার", "তাদের", "আজ",
+    "কাল", "গতকাল", "জানাল", "জানায়", "বললেন", "বলছে", "সঙ্গে", "দিয়ে", "জন্য", "না", "এর",
+    "কি", "কী", "কেন", "কার", "কাকে", "হলো", "গেছে", "গেল", "উঠেছে", "পড়েছে",
+}
+
+# বিভিন্ন সোর্স (বাংলা ও ইংরেজি) এর একই সংবাদের মূল এন্টাইটি বা সাবজেক্ট ম্যাপিং
+CANONICAL_ENTITIES = {
+    "গাজা": "gaza", "গাজায়": "gaza", "গাজার": "gaza", "gaza": "gaza",
+    "হামাস": "hamas", "হামাসের": "hamas", "hamas": "hamas",
+    "ইসরায়েল": "israel", "ইসরায়েলি": "israel", "israel": "israel", "israeli": "israel",
+    "লেবানন": "lebanon", "লেবাননে": "lebanon", "lebanon": "lebanon",
+    "হিজবুল্লাহ": "hezbollah", "hezbollah": "hezbollah",
+    "ইউক্রেন": "ukraine", "ইউক্রেনে": "ukraine", "ukraine": "ukraine", "ukrainian": "ukraine",
+    "রাশিয়া": "russia", "রাশিয়ার": "russia", "রাশিয়ায়": "russia", "russia": "russia", "russian": "russia",
+    "পুতিন": "putin", "putin": "putin",
+    "ট্রাম্প": "trump", "trump": "trump",
+    "বাইডেন": "biden", "biden": "biden",
+    "ইরান": "iran", "ইরানের": "iran", "iran": "iran", "iranian": "iran",
+    "ভারত": "india", "ভারতের": "india", "india": "india", "indian": "india",
+    "পাকিস্তান": "pakistan", "পাকিস্তানের": "pakistan", "pakistan": "pakistan",
+    "চীন": "china", "চীনের": "china", "china": "china", "chinese": "china",
+    "ঢাকা": "dhaka", "ঢাকায়": "dhaka", "dhaka": "dhaka",
+    "চট্টগ্রাম": "chittagong", "chittagong": "chittagong",
+    "সিলেট": "sylhet", "sylhet": "sylhet",
+    "হামলা": "strike", "হামলায়": "strike", "strike": "strike", "attack": "strike", "attacks": "strike",
+    "ক্ষেপণাস্ত্র": "missile", "missile": "missile", "missiles": "missile",
+    "নিহত": "casualty", "মৃত্যু": "casualty", "লাশ": "casualty", "killed": "casualty", "dead": "casualty", "death": "casualty",
+    "আগুন": "fire", "অগ্নিকাণ্ড": "fire", "fire": "fire",
+    "ভূমিকম্প": "earthquake", "earthquake": "earthquake",
+    "বন্যা": "flood", "flood": "flood",
+    "ঘূর্ণিঝড়": "cyclone", "cyclone": "cyclone", "storm": "cyclone",
+    "নির্বাচন": "election", "ভোট": "election", "election": "election", "vote": "election",
+    "বিক্ষোভ": "protest", "আন্দোলন": "protest", "protest": "protest", "protests": "protest",
+    "পদত্যাগ": "resignation", "resigns": "resignation", "resignation": "resignation",
+    "গ্রেপ্তার": "arrest", "arrested": "arrest", "arrest": "arrest",
+}
+
+def extract_story_fingerprints(headline: str) -> tuple[set[str], set[str]]:
+    """শিরোনাম থেকে তাৎপর্যপূর্ণ শব্দ এবং ক্যানোনিকাল এন্টাইটি বের করে।"""
+    clean_words = set()
+    entities = set()
+    tokens = re.findall(r'[a-zA-Zঀ-৿]+', headline.lower())
+    for t in tokens:
+        if t in CANONICAL_ENTITIES:
+            entities.add(CANONICAL_ENTITIES[t])
+        if len(t) > 2 and t not in BENGALI_STOPWORDS and t not in STOPWORDS:
+            clean_words.add(t)
+    return clean_words, entities
+
+def is_duplicate_story(title: str, keywords: str, past_titles: list, past_topics: list, active_entities_list: list) -> tuple[bool, str]:
+    """
+    মাল্টি-ডাইমেনশনাল ডুপ্লিকেট ফিল্টার:
+    ১. এন্টাইটি কোলাইশন (যেমন গাজা + হামলা + নিহত একসাথে থাকা)
+    2. টোকেন জেকার্ড ওভারল্যাপ (ভিন্ন পত্রিকার একই ঘটনা শনাক্তকরণ)
+    3. স্ট্রিং রেশিও সিমিলারিটি
+    4. টপিক ও কীওয়ার্ড ওভারল্যাপ
+    """
+    cur_words, cur_entities = extract_story_fingerprints(title)
+    norm_title = normalize_title(title)
+    kw_tokens = {w.lower() for w in keywords.split()} - STOPWORDS
+
+    # ১. এন্টাইটি কোলাইশন (যেকোনো ২টি প্রধান কী-এন্টাইটি মিললে একই খবর)
+    if len(cur_entities) >= 2:
+        for past_ent in active_entities_list:
+            shared = cur_entities & past_ent
+            if len(shared) >= 2:
+                return True, f"Entity collision ({','.join(shared)})"
+
+    # ২. ওয়ার্ড টোকেন জেকার্ড ওভারল্যাপ
+    for past_t in past_titles:
+        p_words, _ = extract_story_fingerprints(past_t)
+        if cur_words and p_words:
+            inter = len(cur_words & p_words)
+            union = len(cur_words | p_words)
+            if union > 0 and (inter / union) >= 0.38:
+                return True, f"Word token overlap ({inter}/{union})"
+            if inter >= 3:
+                return True, f"Shared {inter} key terms"
+
+        # ৩. স্ট্রিং রেশিও
+        if text_sim(norm_title, normalize_title(past_t)) >= 0.58:
+            return True, f"String similarity >= 0.58"
+
+    # ৪. কীওয়ার্ড টোকেন ওভারল্যাপ
+    if kw_tokens:
+        for past_kw in past_topics:
+            p_kw_tokens = {w.lower() for w in past_kw.split()} - STOPWORDS
+            if kw_tokens and p_kw_tokens:
+                kw_inter = len(kw_tokens & p_kw_tokens)
+                if kw_inter >= 2:
+                    return True, f"Topic keyword overlap ({','.join(kw_tokens & p_kw_tokens)})"
+                if text_sim(" ".join(kw_tokens), " ".join(p_kw_tokens)) >= 0.65:
+                    return True, f"Keyword similarity >= 0.65"
+
+    return False, ""
+
 # ═══════════════════════════ সময় ও ফিল্টারিং ═════════════════════════════════
 def format_pub_time(entry) -> str:
     if not (hasattr(entry, 'published_parsed') and entry.published_parsed):
@@ -334,6 +433,57 @@ def escape_md(text: str) -> str:
     return re.sub(r'([_*\[\]`])', r'\\\1', text)
 
 # ══════════════════════════════════════════════════════════════════════════════
+# বুদ্ধিমান ভাইরাল স্কোর ও গুরুত্ব ক্যালকুলেটর (কখনোই ফ্ল্যাট ৫০ হবে না)
+# ══════════════════════════════════════════════════════════════════════════════
+def calculate_heuristic_viral_score(headline: str) -> tuple[int, str]:
+    """
+    খবরের ক্যাটাগরি ও কী-ইমপ্যাক্ট বিশ্লেষণ করে তাৎক্ষণিক ডাইনামিক ভাইরাল স্কোর (৩৫-৯৮)
+    এবং প্রাসঙ্গিক বাংলা গুরুত্ব নির্ধারণ করে। কোনো খবরই একঘেয়ে ৫০-এ আটকে থাকবে না।
+    """
+    hl = headline.lower()
+
+    # টিয়ার ১: যুদ্ধ, ক্ষেপণাস্ত্র, বিমান হামলা, বিস্ফোরণ, প্রাণহানি, ভূমিকম্প, মহাদুর্যোগ (৮৮-৯৮)
+    tier1_triggers = [
+        "যুদ্ধ", "ক্ষেপণাস্ত্র", "বিমান হামলা", "হামলা", "ড্রোন হামলা", "বোমা", "বিস্ফোরণ",
+        "নিহত", "মৃত", "লাশ", "হত্যা", "বিধ্বস্ত", "ধ্বংস", "ভূমিকম্প", "মহাদুর্যোগ",
+        "জরুরি অবস্থা", "সামরিক অভ্যুত্থান", "কারফিউ", "গণহত্যা", "পারমাণবিক", "আগ্রাসন",
+        "war", "missile", "airstrike", "bomb", "blast", "explosion", "killed", "dead",
+        "casualty", "assassination", "massacre", "earthquake", "coup"
+    ]
+    if any(w in hl for w in tier1_triggers):
+        score = 90
+        if any(w in hl for w in ["নিহত", "ধ্বংস", "বিস্ফোরণ", "ক্ষেপণাস্ত্র", "killed", "blast"]):
+            score += 4
+        if any(w in hl for w in ["শতাধিক", "বহু", "ভয়াবহ", "ব্যাপক", "massive", "dozens"]):
+            score += 4
+        return min(98, score), "এই সংঘাত ও বিপর্যয়ের বিস্তার আঞ্চলিক নিরাপত্তা ও বিশ্ববাজারে তাৎক্ষণিক তীব্র প্রভাব ফেলবে।"
+
+    # টিয়ার ২: উচ্চ রাজনীতি, পদত্যাগ, আন্দোলন, সংঘর্ষ, গ্রেপ্তার, অর্থনৈতিক বা ডলার সংকট (৭৫-৮৭)
+    tier2_triggers = [
+        "পদত্যাগ", "বিক্ষোভ", "আন্দোলন", "সংঘর্ষ", "গুলি", "অগ্নিসংযোগ", "গ্রেপ্তার",
+        "কারাদণ্ড", "রায়", "আদালত", "বিচার", "মুদ্রাস্ফীতি", "ডলার সংকট", "নিষেধাজ্ঞা",
+        "অবরোধ", "উত্তেজনা", "পলাতক", "দাঙ্গা", "বন্যা", "ঘূর্ণিঝড়", "জ্বালানি তেল",
+        "protest", "clash", "resigns", "resignation", "arrested", "court", "sanctions", "inflation", "flood"
+    ]
+    if any(w in hl for w in tier2_triggers):
+        score = 78
+        if any(w in hl for w in ["সংঘর্ষ", "গ্রেপ্তার", "পদত্যাগ", "resigns", "clash"]):
+            score += 5
+        return min(88, score), "রাজনৈতিক ও প্রাতিষ্ঠানিক এই পরিবর্তনের ফলে দেশের ভবিষ্যৎ পরিস্থিতি ও জনজীবনে সরাসরি প্রভাব পড়বে।"
+
+    # টিয়ার ৩: নির্বাচন, সংসদ, আন্তর্জাতিক শীর্ষ বৈঠক, বাজেট, বিশ্বকাপ ট্রফি, মেগা প্রকল্প (৬০-৭৪)
+    tier3_triggers = [
+        "নির্বাচন", "ভোট", "সংসদ", "সরকার", "প্রধানমন্ত্রী", "রাষ্ট্রপতি", "চুক্তি",
+        "বৈঠক", "সম্মেলন", "বাজেট", "কর", "মহাকাশ", "বিশ্বকাপ", "ফাইনাল", "ট্রফি",
+        "জয়", "উদ্বোধন", "মেগা প্রকল্প", "election", "vote", "summit", "deal", "world cup"
+    ]
+    if any(w in hl for w in tier3_triggers):
+        return 68, "জাতীয় ও বৈশ্বিক এই গুরুত্বপূর্ণ প্রক্রিয়ার ফলাফল জনস্বার্থ এবং অর্থনীতির গতিপথে ইতিবাচক ভূমিকা রাখবে।"
+
+    # টিয়ার ৪: সাধারণ জাতীয়/আন্তর্জাতিক ফিচার ও রুটিন আপডেট (৪৫-৫৬)
+    return 48, "সংবাদটির গতিপ্রকৃতি ও পরবর্তী বাস্তব ফলাফল সংশ্লিষ্ট ক্ষেত্র এবং দর্শকদের কাছে বিশেষভাবে পর্যবেক্ষণযোগ্য।"
+
+# ══════════════════════════════════════════════════════════════════════════════
 # স্মার্ট ফলব্যাক ফাংশন (Never returns "world event")
 # ══════════════════════════════════════════════════════════════════════════════
 def _fallback_keywords(headline: str) -> str:
@@ -361,16 +511,17 @@ def _fallback_keywords(headline: str) -> str:
 
 # ═══════════════════════════ Gemini কীওয়ার্ড + ভাইরাল স্কোর ════════════════════
 def get_gemini_analysis(headline: str) -> dict:
+    heur_score, heur_imp = calculate_heuristic_viral_score(headline)
     default = {
         "keywords":      _fallback_keywords(headline),
-        "viral_score":   50,
-        "importance_bn": "দর্শকদের জন্য এই সংবাদের প্রেক্ষাপট তাৎপর্যপূর্ণ।",
+        "viral_score":   heur_score,
+        "importance_bn": heur_imp,
     }
     if not GEMINI_API_KEY:
         return default
 
-    # ৫-৩ হাই ডিমান্ড বা সাময়িক ট্রাফিক সামলাতে একাধিক মডেল ট্রাই করা হবে
-    CANDIDATE_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    # কার্যকর সক্রিয় Gemini মডেল তালিকা (gemini-2.0-flash, gemini-1.5-flash, gemini-flash-latest)
+    CANDIDATE_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-flash-latest"]
 
     prompt = (
         f"You are a senior news editor for a Bangladeshi YouTube channel.\n"
@@ -616,10 +767,10 @@ def process_news():
     sent_titles      = data.get("sent_titles", [])
     sent_topics      = data.get("sent_topics", [])
 
-    title_map: dict[str, list[dict]] = {}
-
     # ২. সমস্ত ফিড থেকে লাইভ সংবাদ সংগ্রহ (User-Agent সহ যাতে কোনো ফিড ব্লক না হয়)
-    print("\n📡 সমস্ত আরএসএস সোর্স ক্রল করা হচ্ছে (প্রথম আলো, বিবিসি বাংলা, DW, সিএনএন, আল জাজিরা)...")
+    print("
+📡 সমস্ত আরএসএস সোর্স ক্রল করা হচ্ছে (প্রথম আলো, বিবিসি বাংলা, DW, সিএনএন, আল জাজিরা)...")
+    raw_articles = []
     for source, feed_url in RSS_FEEDS.items():
         try:
             # requests দিয়ে ফেচ করা নিশ্চিত করে রিয়েল ব্রাউজার হেডার
@@ -635,8 +786,13 @@ def process_news():
                 if is_old_story(entry, norm_url):
                     continue
 
+                clean_words, entities = extract_story_fingerprints(entry.title)
+                fp  = url_fingerprint(entry.link)
+                tfp = title_fingerprint(entry.title)
                 cfp = content_fingerprint(entry.title)
-                if cfp in sent_cfp_set:
+
+                # পুরোনো পাঠানো লিংকের সাথে এক্সাক্ট ম্যাচ থাকলে বাদ
+                if fp in sent_fp_set or tfp in sent_tfp_set or cfp in sent_cfp_set:
                     continue
 
                 article = {
@@ -647,115 +803,148 @@ def process_news():
                     "pub_time":  format_pub_time(entry),
                     "pub_ts":    get_pub_timestamp(entry),
                     "fresh_pts": freshness_score(entry),
+                    "fp":        fp,
+                    "tfp":       tfp,
                     "cfp":       cfp,
+                    "words":     clean_words,
+                    "entities":  entities,
                     "entry":     entry,
                 }
-
-                nt = normalize_title(entry.title)
-                matched_key = None
-                for existing_key in title_map:
-                    if text_sim(nt, existing_key) >= 0.70:
-                        matched_key = existing_key
-                        break
-                if matched_key:
-                    title_map[matched_key].append(article)
-                else:
-                    title_map[nt] = [article]
+                raw_articles.append(article)
                 taken += 1
             print(f"  ✓ {source}: {taken}টি সাম্প্রতিক সংবাদ পাওয়া গেছে")
         except Exception as e:
             print(f"  ⚠️ ফিড ত্রুটি ({source}): {e}")
 
+    # ৩. মাল্টি-সোর্স ক্লাস্টারিং: একই খবর দেশি-বিদেশি একাধিক মাধ্যমে এলে সেগুলোকে একসাথে গ্রুপ করা
+    story_groups: list[list[dict]] = []
+    for art in raw_articles:
+        matched_group = None
+        for group in story_groups:
+            rep = group[0]
+            # ক) ২ বা ততোধিক প্রধান এন্টাইটি মিললে (যেমন গাজা + হামলা)
+            if art["entities"] and rep["entities"] and len(art["entities"] & rep["entities"]) >= 2:
+                matched_group = group
+                break
+            # খ) শব্দ টোকেন জেকার্ড মিল (>= 0.38)
+            if art["words"] and rep["words"]:
+                inter = len(art["words"] & rep["words"])
+                union = len(art["words"] | rep["words"])
+                if union > 0 and (inter / union) >= 0.38:
+                    matched_group = group
+                    break
+            # গ) স্ট্রিং রেশিও (>= 0.60)
+            if text_sim(normalize_title(art["title"]), normalize_title(rep["title"])) >= 0.60:
+                matched_group = group
+                break
+
+        if matched_group is not None:
+            matched_group.append(art)
+        else:
+            story_groups.append([art])
+
     candidates = []
-    for nt, group in title_map.items():
-        best = max(group, key=lambda x: x["pub_ts"])
+    for group in story_groups:
+        # বাংলা শিরোনাম থাকলে অগ্রাধিকার দিন (দর্শকের সুবিধার জন্য)
+        bn_articles = [g for g in group if any(ord(c) >= 0x0980 and ord(c) <= 0x09FF for c in g["title"])]
+        best = max(bn_articles if bn_articles else group, key=lambda x: x["pub_ts"])
         sources_list = list({g["source"] for g in group})
         best["multi_source"]  = len(sources_list) > 1
         best["sources_str"]   = " | ".join(sources_list)
-        best["base_score"]    = best["fresh_pts"] + (MULTI_SOURCE_BONUS if best["multi_source"] else 0)
+        # মাল্টি-সোর্স স্বীকৃতি পেলে সংবাদের গুরুত্ব অনেক বেশি (+৩৫ পয়েন্ট বোনাস)
+        best["base_score"]    = best["fresh_pts"] + (35 if best["multi_source"] else 0)
         candidates.append(best)
 
-    print(f"\n🔍 ফিল্টারিং ও ডুপ্লিকেট যাচাই: {len(candidates)} টি ক্যান্ডিডেট স্টোরি...")
+    print(f"
+🔍 ফিল্টারিং ও ডুপ্লিকেট যাচাই: {len(candidates)} টি অনন্য ঘটনা...")
 
-    filtered = []
-    dup_url = dup_title = dup_kw_pre = 0
+    # ৪. সাইকেল চলাকালীন রিয়েল-টাইম ডুপ্লিকেট ট্র্যাকিং
+    # (যাতে এই একই রানে কোনো অবস্থাতেই একই খবর বা টপিক দ্বিতীয়বার না আসে)
+    active_titles   = list(sent_titles)
+    active_topics   = list(sent_topics)
+    active_entities = [extract_story_fingerprints(t)[1] for t in sent_titles[-80:]]
+
+    analyzed = []
+    dup_count = 0
 
     for item in candidates:
-        title = item["title"]
-        link  = item["link"]
-        fp    = url_fingerprint(link)
-        tfp   = title_fingerprint(title)
-
-        if fp in sent_fp_set:
-            dup_url += 1
-            continue
-
-        if tfp in sent_tfp_set:
-            dup_title += 1
-            continue
-
-        is_dup, score, _ = is_title_duplicate(title, sent_titles)
+        # প্রাথমিক ডুপ্লিকেট যাচাই
+        is_dup, reason = is_duplicate_story(item["title"], "", active_titles, active_topics, active_entities)
         if is_dup:
-            dup_title += 1
+            dup_count += 1
             continue
 
-        item["fp"]  = fp
-        item["tfp"] = tfp
-        filtered.append(item)
-
-    # Gemini দ্বারা ভাইরাল স্কোরিং ও কীওয়ার্ড অ্যানালাইসিস
-    analyzed = []
-    for item in filtered:
+        # ভাইরাল স্কোরিং ও কীওয়ার্ড অ্যানালাইসিস (জেমিনি বা স্মার্ট নিউজরুম হিউরিস্টিক)
         analysis = get_gemini_analysis(item["title"])
 
-        is_dup, score, _ = is_keyword_duplicate(analysis["keywords"], sent_topics)
+        # কীওয়ার্ড ও টপিক দিয়ে চূড়ান্ত ডুপ্লিকেট যাচাই
+        is_dup, reason = is_duplicate_story(item["title"], analysis["keywords"], active_titles, active_topics, active_entities)
         if is_dup:
-            dup_kw_pre += 1
+            dup_count += 1
             continue
+
+        # এই সাইকেলের অ্যাক্টিভ তালিকায় সাথে সাথে যোগ যাতে পরবর্তী কোনো খবরে ডাবল না হয়!
+        active_titles.append(item["title"])
+        active_topics.append(analysis["keywords"])
+        if item.get("entities"):
+            active_entities.append(item["entities"])
 
         total_score = item["base_score"] + analysis["viral_score"]
         analyzed.append((total_score, item, analysis))
 
+    if dup_count > 0:
+        print(f"  🛡️ ডুপ্লিকেট ফিল্টারে স্বয়ংক্রিয়ভাবে বাদ পড়েছে: {dup_count}টি সংবাদ")
+
+    # স্কোর অনুযায়ী প্রাথমিক ডিসেন্ডিং সর্ট
     analyzed.sort(key=lambda x: x[0], reverse=True)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # মাল্টি-সোর্স ফেয়ার ব্যালেন্সিং অ্যালগরিদম (Multi-Source Diversity Fair Share)
-    # যাতে একক কোনো সোর্স (যেমন শুধু আল জাজিরা) সব স্লট দখল না করে!
-    # প্রথম আলো, বিবিসি বাংলা, সিএনএন, DW এবং আল জাজিরা সবই সুযোগ পাবে।
+    # টপ ব্রেকিং নিউজ ফার্স্ট ও মাল্টি-সোর্স সিলেকশন
     # ══════════════════════════════════════════════════════════════════════════
-    source_buckets: dict[str, list] = {}
-    for score, item, analysis in analyzed:
-        src = item["source"]
-        source_buckets.setdefault(src, []).append((score, item, analysis))
-
     selected_posts = []
-    source_counts = {s: 0 for s in source_buckets}
+    selected_links = set()
+    source_counts = {s: 0 for s in RSS_FEEDS}
 
-    # ধাপ ১: প্রতিটি সক্রিয় সোর্স থেকে অন্তত ১টি করে সেরা খবর বাছাই
-    for src, items in source_buckets.items():
-        if items and len(selected_posts) < MAX_POST_PER_RUN:
-            selected_posts.append(items[0])
-            source_counts[src] += 1
+    # ধাপ ১: সুপার ভাইরাল ও ব্রেকিং নিউজ (টোটাল স্কোর >= 110) সরাসরি নিশ্চিত সিলেকশন!
+    # (কোনো সোর্স কোটা বা লিমিটের কারণে সবচেয়ে জরুরি খবর যেন আটকে না যায়)
+    for score, item, analysis in analyzed:
+        if score >= 110 and len(selected_posts) < MAX_POST_PER_RUN:
+            selected_posts.append((score, item, analysis))
+            selected_links.add(item["link"])
+            source_counts[item["source"]] = source_counts.get(item["source"], 0) + 1
 
-    # ধাপ ২: বাকি স্লটগুলো অন্যান্য হাই-স্কোরিং খবর দিয়ে পূরণ (সর্বোচ্চ MAX_POSTS_PER_SOURCE)
-    remaining_items = []
-    for src, items in source_buckets.items():
-        for itm in items[1:]:
-            remaining_items.append(itm)
-    remaining_items.sort(key=lambda x: x[0], reverse=True)
-
-    for score, item, analysis in remaining_items:
+    # ধাপ ২: বিভিন্ন সোর্সের সেরা খবর দিয়ে ব্যালেন্সড সিলেকশন (সর্বোচ্চ MAX_POSTS_PER_SOURCE)
+    for score, item, analysis in analyzed:
         if len(selected_posts) >= MAX_POST_PER_RUN:
             break
+        if item["link"] in selected_links:
+            continue
         src = item["source"]
         if source_counts.get(src, 0) < MAX_POSTS_PER_SOURCE:
             selected_posts.append((score, item, analysis))
+            selected_links.add(item["link"])
             source_counts[src] = source_counts.get(src, 0) + 1
 
-    print(f"\n🎯 মাল্টি-সোর্স ব্যালেন্সড পোস্ট বাছাই: {len(selected_posts)} টি")
-    for s, c in source_counts.items():
-        if c > 0:
-            print(f"   • {s}: {c}টি সংবাদ")
+    # ধাপ ৩: স্লট খালি থাকলে বাকি উচ্চ-স্কোরের খবর নেওয়া
+    if len(selected_posts) < MIN_POST_PER_RUN:
+        for score, item, analysis in analyzed:
+            if len(selected_posts) >= MAX_POST_PER_RUN:
+                break
+            if item["link"] not in selected_links:
+                selected_posts.append((score, item, analysis))
+                selected_links.add(item["link"])
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ক্রুশিয়াল: সর্বোচ্চ স্কোরের টপ ব্রেকিং খবরটি সবার আগে টেলিগ্রামে পোস্ট হবে!
+    # (Strict descending order: #1 top news sent first)
+    # ══════════════════════════════════════════════════════════════════════════
+    selected_posts.sort(key=lambda x: x[0], reverse=True)
+
+    print(f"
+🎯 চূড়ান্ত পোস্ট বাছাই: {len(selected_posts)} টি (সেরা টপ খবরগুলো সবার আগে)")
+    for score, item, analysis in selected_posts:
+        ms_tag = f" [মাল্টি-সোর্স: {item['sources_str']}]" if item.get('multi_source') else ""
+        print(f"   • [{score} pts] ({item['source']}) {item['title'][:55]}...{ms_tag}")
     print(f"{'─'*60}")
 
     posted = 0
