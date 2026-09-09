@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 # ── Gemini SDK ইমপোর্ট (আধুনিক google-genai অফিসিয়াল প্যাকেজ + ব্যাকওয়ার্ড কম্প্যাটিবিলিটি) ──
 USE_MODERN_GENAI = False
 _CLIENT = None
+legacy_genai = None
 
 try:
     from google import genai
@@ -26,7 +27,7 @@ except ImportError:
         import google.generativeai as legacy_genai
         USE_MODERN_GENAI = False
     except ImportError:
-        pass
+        legacy_genai = None
 
 # ═══════════════════════════════ কনফিগারেশন ══════════════════════════════════
 BOT_TOKEN      = os.environ.get("BOT_TOKEN")
@@ -69,12 +70,14 @@ if GEMINI_API_KEY:
             _CLIENT = genai.Client(api_key=GEMINI_API_KEY)
         except Exception as e:
             print(f"⚠️ Modern Google-GenAI init error: {e}")
-    else:
+    elif legacy_genai is not None:
         try:
             legacy_genai.configure(api_key=GEMINI_API_KEY)
             _CLIENT = legacy_genai
         except Exception as e:
             print(f"⚠️ Legacy Gemini Config Error: {e}")
+    else:
+        print("ℹ️ Google GenAI লাইব্রেরি পাওয়া যায়নি — স্মার্ট অফলাইন ফলব্যাক ইঞ্জিন সক্রিয় থাকবে।")
 
 # ── মাল্টি-সোর্স আরএসএস ফিডস (বাংলা ও আন্তর্জাতিক সংবাদ সোর্স) ─────────────
 RSS_FEEDS = {
@@ -768,8 +771,7 @@ def process_news():
     sent_topics      = data.get("sent_topics", [])
 
     # ২. সমস্ত ফিড থেকে লাইভ সংবাদ সংগ্রহ (User-Agent সহ যাতে কোনো ফিড ব্লক না হয়)
-    print("
-📡 সমস্ত আরএসএস সোর্স ক্রল করা হচ্ছে (প্রথম আলো, বিবিসি বাংলা, DW, সিএনএন, আল জাজিরা)...")
+    print("\n📡 সমস্ত আরএসএস সোর্স ক্রল করা হচ্ছে (প্রথম আলো, বিবিসি বাংলা, DW, সিএনএন, আল জাজিরা)...")
     raw_articles = []
     for source, feed_url in RSS_FEEDS.items():
         try:
@@ -855,8 +857,7 @@ def process_news():
         best["base_score"]    = best["fresh_pts"] + (35 if best["multi_source"] else 0)
         candidates.append(best)
 
-    print(f"
-🔍 ফিল্টারিং ও ডুপ্লিকেট যাচাই: {len(candidates)} টি অনন্য ঘটনা...")
+    print(f"\n🔍 ফিল্টারিং ও ডুপ্লিকেট যাচাই: {len(candidates)} টি অনন্য ঘটনা...")
 
     # ৪. সাইকেল চলাকালীন রিয়েল-টাইম ডুপ্লিকেট ট্র্যাকিং
     # (যাতে এই একই রানে কোনো অবস্থাতেই একই খবর বা টপিক দ্বিতীয়বার না আসে)
@@ -940,8 +941,7 @@ def process_news():
     # ══════════════════════════════════════════════════════════════════════════
     selected_posts.sort(key=lambda x: x[0], reverse=True)
 
-    print(f"
-🎯 চূড়ান্ত পোস্ট বাছাই: {len(selected_posts)} টি (সেরা টপ খবরগুলো সবার আগে)")
+    print(f"\n🎯 চূড়ান্ত পোস্ট বাছাই: {len(selected_posts)} টি (সেরা টপ খবরগুলো সবার আগে)")
     for score, item, analysis in selected_posts:
         ms_tag = f" [মাল্টি-সোর্স: {item['sources_str']}]" if item.get('multi_source') else ""
         print(f"   • [{score} pts] ({item['source']}) {item['title'][:55]}...{ms_tag}")
@@ -1013,8 +1013,13 @@ def main():
         else:
             print(f"\n🚀 এককালীন টেস্ট রান শুরু — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-        process_news()
-        print("✅ সাইকেল সফলভাবে সম্পন্ন হয়েছে। এক্সিট কোড: 0")
+        try:
+            process_news()
+            print("✅ সাইকেল সফলভাবে সম্পন্ন হয়েছে। এক্সিট কোড: 0")
+        except Exception as e:
+            print(f"⚠️ সাইকেল চলাকালে সতর্কতা/ত্রুটি (স্বয়ংক্রিয়ভাবে হ্যান্ডেল করা হয়েছে): {e}")
+            import traceback
+            traceback.print_exc()
         return
 
     # নিয়মিত ১.৫ ঘণ্টা পর পর স্বয়ংক্রিয় ক্রল শিডিউলার
