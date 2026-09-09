@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import time
 import json
@@ -15,14 +16,16 @@ BOT_TOKEN      = os.environ.get("BOT_TOKEN")
 CHAT_ID        = os.environ.get("CHAT_ID")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# ── পোস্টিং লিমিট ─────────────────────────────────────────────────────────
-MAX_POST_PER_RUN     = 7
-MIN_POST_PER_RUN     = 5
-RETENTION_HOURS      = 24
-NEWS_AGE_LIMIT_HOURS = 10
-MAX_ENTRIES_PER_FEED = 20
-MAX_SAVED_LINKS      = 2000
-MAX_SAVED_TITLES     = 500
+# ── পোস্টিং ও শিডিউলিং লিমিট ──────────────────────────────────────────────
+MAX_POST_PER_RUN       = 7     # প্রতি সাইকেলে মোট সর্বোচ্চ পোস্ট
+MIN_POST_PER_RUN       = 4     # প্রতি সাইকেলে ন্যূনতম পোস্ট
+MAX_POSTS_PER_SOURCE   = 2     # কোনো একক সোর্স (যেমন আল জাজিরা) একা সব পোস্ট দখল করতে পারবে না!
+RETENTION_HOURS        = 24    # ২৪ ঘণ্টা পর টেলিগ্রাম পোস্ট অটো ডিলিট হবে
+CRAWL_INTERVAL_MINUTES = 90    # এক্সাক্ট ১.৫ ঘণ্টা (৯০ মিনিট) পর পর ক্রল হবে
+NEWS_AGE_LIMIT_HOURS   = 10    # ১০ ঘণ্টার বেশি পুরোনো সংবাদ বাদ
+MAX_ENTRIES_PER_FEED   = 25
+MAX_SAVED_LINKS        = 2000
+MAX_SAVED_TITLES       = 500
 
 # ── ডুপ্লিকেট থ্রেশহোল্ড ──────────────────────────────────────────────────
 TITLE_SIM_THRESHOLD   = 0.60
@@ -32,10 +35,15 @@ KEYWORD_SIM_THRESHOLD = 0.70
 MULTI_SOURCE_BONUS    = 30
 FRESHNESS_BONUS_HOURS = 2
 FRESHNESS_BONUS_PTS   = 60
-
-POST_DELAY_SEC = 2.0
+POST_DELAY_SEC        = 2.0
 
 OLD_YEAR_PATTERNS = ["/2021/", "/2022/", "/2023/", "/2024/"]
+
+# ── রিয়েল ব্রাউজার হেডার (প্রথম আলো বা বিবিসি যেন রিকোয়েস্ট ব্লক না করে) ───
+REQUEST_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "application/rss+xml, application/xml, text/xml; q=0.9, */*; q=0.8"
+}
 
 # ── Gemini কনফিগ ────────────────────────────────────────────────────────────
 if GEMINI_API_KEY:
@@ -44,13 +52,14 @@ if GEMINI_API_KEY:
     except Exception as e:
         print(f"⚠️ Gemini Config Error: {e}")
 
+# ── মাল্টি-সোর্স আরএসএস ফিডস (বাংলা ও আন্তর্জাতিক সংবাদ সোর্স) ─────────────
 RSS_FEEDS = {
-    "BBC Bangla":  "https://feeds.bbci.co.uk/bengali/rss.xml",
     "Prothom Alo": "https://www.prothomalo.com/feed",
+    "BBC Bangla":  "https://feeds.bbci.co.uk/bengali/rss.xml",
+    "DW Bangla":   "https://rss.dw.com/rdf/rss-ben-all",
     "Al Jazeera":  "https://www.aljazeera.com/xml/rss/all.xml",
     "CNN":         "http://rss.cnn.com/rss/edition.rss",
-    "Reuters":     "https://feeds.reuters.com/reuters/topNews",
-    "DW Bangla":   "https://rss.dw.com/rdf/rss-ben-all",
+    "BBC World":   "https://feeds.bbci.co.uk/news/world/rss.xml",
 }
 
 DATA_FILE = "bot_data.json"
@@ -66,38 +75,85 @@ STOPWORDS = {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# স্ক্রিপ্ট ফরম্যাট টেমপ্লেট (attached format অনুযায়ী)
+# বাংলা সংবাদের জন্য স্মার্ট কীওয়ার্ড ও স্টক ফুটেজ ট্যাগ ডিকশনারি
+# (বাংলা হেডলাইন হলেও কখনো "world event" আসবে না)
 # ══════════════════════════════════════════════════════════════════════════════
-SCRIPT_FORMAT_TEMPLATE = """আপনি একজন আন্তর্জাতিক বাংলা নিউজ চ্যানেলের এক্সিকিউটিভ প্রডিউসার।
-নিচের সংবাদ শিরোনাম থেকে নিচের ফরম্যাটে হুবহু একটি প্রফেশনাল বাংলা টিভি নিউজ স্ক্রিপ্ট তৈরি করুন।
+BANGLA_KEYWORD_MAP = {
+    "গাজা": "Gaza war ruins",
+    "হামাস": "Hamas conflict soldiers",
+    "ইসরায়েল": "Israel military strike",
+    "ইসরায়েলি": "Israel military missile",
+    "লেবানন": "Lebanon Beirut strike",
+    "হিজবুল্লাহ": "Hezbollah rocket strike",
+    "ইউক্রেন": "Ukraine war front",
+    "রাশিয়া": "Russia military missile",
+    "পুতিন": "Vladimir Putin Kremlin",
+    "যুক্তরাষ্ট্র": "US White House",
+    "চীন": "China military Beijing",
+    "ভারত": "India Delhi politics",
+    "পাকিস্তান": "Pakistan politics Islamabad",
+    "ঢাকা": "Dhaka Bangladesh city",
+    "চট্টগ্রাম": "Chittagong port Bangladesh",
+    "সিলেট": "Sylhet flood rain",
+    "নির্বাচন": "election vote ballot",
+    "বিক্ষোভ": "street protest crowd",
+    "আন্দোলন": "crowd protest rally",
+    "সংঘর্ষ": "police clash teargas",
+    "গুলি": "shooting police clash",
+    "নিহত": "killed casualty crime",
+    "মৃত্যু": "ambulance hospital emergency",
+    "আহত": "injured hospital medical",
+    "গ্রেপ্তার": "police arrest handcuffs",
+    "আদালত": "courtroom judge gavel",
+    "সরকার": "parliament cabinet government",
+    "প্রধানমন্ত্রী": "prime minister speech",
+    "ভূমিকম্প": "earthquake rubble destruction",
+    "বন্যা": "flood rescue water",
+    "ঘূর্ণিঝড়": "cyclone storm devastation",
+    "ঝড়": "storm heavy rain",
+    "আগুন": "firefighters building flame",
+    "দুর্ঘটনা": "highway road crash",
+    "অর্থনীতি": "economy stock market",
+    "মুদ্রাস্ফীতি": "price hike grocery market",
+    "ডলার": "dollar currency bank",
+    "তেল": "fuel oil refinery",
+    "বিমান": "airplane airport flight",
+    "ক্রিকেট": "cricket stadium match",
+    "ফুটবল": "football soccer stadium",
+    "বিশ্বকাপ": "world cup trophy",
+    "হাসপাতাল": "hospital medical emergency",
+    "ডেঙ্গু": "dengue mosquito hospital",
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# হিউম্যান-রাইটিং টিভি স্ক্রিপ্ট ফরম্যাট (কোনো স্পনসর বা Walton AC থাকবে না)
+# ══════════════════════════════════════════════════════════════════════════════
+SCRIPT_FORMAT_TEMPLATE = """আপনি একজন বাস্তব অভিজ্ঞ বাংলা টিভি সাংবাদিক এবং ইউটিউব নিউজ প্রেজেন্টার।
+নিচের সংবাদটি নিয়ে মানুষের মুখে বলা সহজ, প্রাঞ্জল ও আকর্ষণীয় একটি টিভি স্ক্রিপ্ট লিখুন।
+কোনো স্পনসর (যেমন Walton AC বা বিজ্ঞাপন) থাকবে না। কোনো কৃত্রিম রোবোটিক বা কঠিন বিশ্লেষণ করবেন না।
 
 সংবাদ: "{headline}"
 
-━━━━━━━━━━━━━ আউটপুট ফরম্যাট ━━━━━━━━━━━━━
+━━━━━━━━━━━━━ হিউম্যান আউটপুট ফরম্যাট ━━━━━━━━━━━━━
 
-WALTON AC SPONSOR
+থাম: [ইউটিউব থাম্বনেইলের জন্য ৫-৭ শব্দের তীব্র কৌতূহলী হুক]
 
-থাম: [স্পনসর ট্যাগলাইন বা ব্রেকিং ব্যানার — ৮-১২ শব্দ]
+হেড: [আকর্ষণীয় ও নাটকীয় প্রশ্নবোধক/কৌতূহলী শিরোনাম]
 
-হেড: [আকর্ষণীয় বাংলা ইউটিউব শিরোনাম — প্রশ্নবোধক বা কৌতূহলী ভাষায়]
+[One crisp, factual English summary line for international context]
 
-[ইংরেজিতে মূল খবরের এক লাইন সারসংক্ষেপ]
+ডেস
+[উপস্থাপকের ১৫-২০ সেকেন্ডের সাবলীল সূচনা। সহজ ও কথ্য ভাষায় দর্শককে সরাসরি বলবেন, যেমন: "দর্শক, এইমাত্র পাওয়া জরুরি খবরে জানা যাচ্ছে..."]
 
-ডেস [anchor intro — উপস্থাপক ২০ সেকেন্ডে পড়বেন, দর্শকের কাছে গল্পের মতো উপস্থাপন করুন]
-
-ভয়েসওভার [৯০-১১০ শব্দের ভয়েসওভার স্ক্রিপ্ট। প্রতিটি প্যারার পর লিখুন:
-আপস… (এটি ভিডিও এডিটরের জন্য কাটপয়েন্ট সংকেত)
-ব্র্যাকেটে বি-রোল নির্দেশ দিন যেমন: [কানাডার পার্লামেন্ট ভবনের ফুটেজ]]
+ভয়েসওভার
+[৬০-৮০ শব্দের বাস্তবসম্মত, প্রাঞ্জল ও কথ্য ভয়েসওভার। কোনো অপ্রয়োজনীয় জটিল বাক্য নয়। প্রতিটি প্যারার পর লিখুন "আপস…" এবং ছোট বি-রোল নির্দেশ যেমন: [বি-রোল: সংশ্লিষ্ট ঘটনার ফুটেজ]]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-নিয়ম:
-- ভয়েসওভারে প্রতিটি অনুচ্ছেদের শেষে অবশ্যই "আপস…" লিখুন
-- বি-রোল নির্দেশ ব্র্যাকেটে দিন
-- থাম ও হেড আলাদা লাইনে থাকবে
-- ডেস ও ভয়েসওভার আলাদা সেকশন হবে
-- ইংরেজি লাইনটি হেড ও ডেস-এর মাঝে থাকবে"""
-
+নিয়মাবলী:
+- স্পনসর বা বিজ্ঞাপনী কোনো শব্দ লিখবেন না।
+- ভয়েসওভারের প্যারাশেষে "আপস…" ও ব্র্যাকেটে [বি-রোল] নির্দেশ রাখুন।
+- লেখাটি যেন শুনে মনে হয় রক্ত-মাংসের একজন পেশাদার সাংবাদিক নিজের ভাষায় উপস্থাপন করছেন।"""
 
 # ═══════════════════════════ ডেটা লোড / সেভ ══════════════════════════════════
 def load_data() -> dict:
@@ -110,18 +166,17 @@ def load_data() -> dict:
                 data.setdefault("sent_topics", [])
                 data.setdefault("telegram_messages", [])
                 data.setdefault("title_fingerprints", [])
-                # FIX: Al Jazeera content fingerprint store
                 data.setdefault("sent_content_fps", [])
                 return data
         except Exception as e:
             print(f"⚠️ Data load error: {e}")
     return {
-        "sent_links":          [],
-        "sent_titles":         [],
-        "sent_topics":         [],
-        "telegram_messages":   [],
-        "title_fingerprints":  [],
-        "sent_content_fps":    [],
+        "sent_links":         [],
+        "sent_titles":        [],
+        "sent_topics":        [],
+        "telegram_messages":  [],
+        "title_fingerprints": [],
+        "sent_content_fps":   [],
     }
 
 def save_data(data: dict):
@@ -149,19 +204,12 @@ def title_fingerprint(title: str) -> str:
     clean = re.sub(r'\W+', '', title.lower())[:60]
     return hashlib.md5(clean.encode()).hexdigest()
 
-# ══════════════════════════════════════════════════════════════════════════════
-# FIX: Al Jazeera ডুপ্লিকেট — content-based fingerprint
-# Al Jazeera একই খবর ভিন্ন URL-এ দেয়। তাই শুধু URL নয়,
-# টাইটেলের প্রথম ৮ শব্দ দিয়ে content fingerprint তৈরি করো।
-# ══════════════════════════════════════════════════════════════════════════════
 def content_fingerprint(title: str) -> str:
-    """টাইটেলের প্রথম ৮টি শব্দ (lowercase, punctuation বাদ) দিয়ে MD5।
-    এটি Al Jazeera-র URL-ভিন্নতা সত্ত্বেও same story ধরতে পারে।"""
     words = re.findall(r'[a-zA-Z\u0980-\u09FF]+', title.lower())
     key   = " ".join(words[:8])
     return hashlib.md5(key.encode()).hexdigest()
 
-# ═══════════════════════════ সময় ফরম্যাট ════════════════════════════════════
+# ═══════════════════════════ সময় ও ফিল্টারিং ═════════════════════════════════
 def format_pub_time(entry) -> str:
     if not (hasattr(entry, 'published_parsed') and entry.published_parsed):
         return ""
@@ -206,7 +254,6 @@ def get_pub_timestamp(entry) -> float:
             pass
     return time.time()
 
-# ═══════════════════════════ পুরোনো খবর ফিল্টার ══════════════════════════════
 def is_old_story(entry, url: str) -> bool:
     if any(yr in url for yr in OLD_YEAR_PATTERNS):
         return True
@@ -235,7 +282,6 @@ def freshness_score(entry) -> int:
             pass
     return 0
 
-# ══════════════════════════ ডুপ্লিকেট ডিটেকশন ════════════════════════════════
 def normalize_title(title: str) -> str:
     t = title.lower()
     t = re.sub(r'[^\w\s]', ' ', t)
@@ -263,59 +309,114 @@ def is_keyword_duplicate(new_kw: str, sent_topics: list):
 def escape_md(text: str) -> str:
     return re.sub(r'([_*\[\]`])', r'\\\1', text)
 
-# ═══════════════════════ Gemini কীওয়ার্ড + ভাইরাল স্কোর ══════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# স্মার্ট ফলব্যাক ফাংশন (Never returns "world event")
+# ══════════════════════════════════════════════════════════════════════════════
+def _fallback_keywords(headline: str) -> str:
+    # ১. বাংলা টপিক ম্যাপিং চেক করো
+    for bn_key, en_tag in BANGLA_KEYWORD_MAP.items():
+        if bn_key in headline:
+            return en_tag
+
+    # ২. হেডলাইনে যদি ইংরেজি শব্দ থাকে
+    words = [w for w in re.findall(r'[a-zA-Z]{3,}', headline) if w.lower() not in STOPWORDS]
+    if len(words) >= 2:
+        return " ".join(words[:3])
+    elif len(words) == 1:
+        return f"{words[0]} news event"
+
+    # ৩. প্রসঙ্গভিত্তিক ট্যাগ
+    if any(term in headline for term in ["হত্যা", "খুন", "লাশ", "মরদেহ", "গুলি"]):
+        return "crime police investigation"
+    if any(term in headline for term in ["বৃষ্টি", "বৃষ্টিপাত", "বন্যা", "ভারী"]):
+        return "heavy monsoon rain flood"
+    if any(term in headline for term in ["বিশ্ববিদ্যালয়", "কলেজ", "শিক্ষার্থী", "পরীক্ষা"]):
+        return "student university protest"
+
+    return "breaking international news"
+
+# ═══════════════════════════ Gemini কীওয়ার্ড + ভাইরাল স্কোর ════════════════════
 def get_gemini_analysis(headline: str) -> dict:
     default = {
         "keywords":      _fallback_keywords(headline),
         "viral_score":   50,
-        "importance_bn": "",
+        "importance_bn": "দর্শকদের জন্য এই সংবাদের প্রেক্ষাপট তাৎপর্যপূর্ণ।",
     }
     if not GEMINI_API_KEY:
         return default
-    try:
-        model  = genai.GenerativeModel("gemini-2.0-flash")
-        prompt = (
-            f"You are a senior news editor for a Bangladeshi YouTube channel. "
-            f"Analyze this headline and respond ONLY as valid JSON (no markdown, no explanation):\n"
-            f"Headline: \"{headline}\"\n\n"
-            f"Respond with exactly:\n"
-            f"{{\n"
-            f'  "keywords": "2-3 English nouns best for stock footage search (e.g. \'Gaza protest crowd\')",\n'
-            f'  "viral_score": <integer 0-100>,\n'
-            f'  "importance_bn": "এক বাক্যে বাংলায় দর্শকের জন্য কেন গুরুত্বপূর্ণ"\n'
-            f"}}\n\n"
-            f"viral_score rules:\n"
-            f"  90-100 = war, assassination, natural disaster, global emergency\n"
-            f"  70-89  = major political event, economic crisis, viral protest\n"
-            f"  50-69  = important national/international news\n"
-            f"  30-49  = routine updates, sports, culture\n"
-            f"  0-29   = press releases, minor local news\n"
-            f"keywords rules: ONLY nouns/proper nouns, NO verbs/articles/stopwords."
-        )
-        resp = model.generate_content(prompt)
-        raw  = resp.text.strip()
-        raw  = re.sub(r'^```json|^```|```$', '', raw, flags=re.MULTILINE).strip()
-        data = json.loads(raw)
 
-        keywords = data.get("keywords", "").strip()
-        words    = [w for w in keywords.split() if w.lower() not in STOPWORDS and len(w) > 2]
-        keywords = " ".join(words[:3]) if words else _fallback_keywords(headline)
+    # ৫-৩ হাই ডিমান্ড বা সাময়িক ট্রাফিক সামলাতে একাধিক মডেল ট্রাই করা হবে
+    CANDIDATE_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
 
-        return {
-            "keywords":      keywords,
-            "viral_score":   int(data.get("viral_score", 50)),
-            "importance_bn": data.get("importance_bn", "").strip(),
-        }
-    except Exception as e:
-        print(f"    ⚠️ Gemini analysis error: {e}")
-        return default
+    prompt = (
+        f"You are a senior news editor for a Bangladeshi YouTube channel.\n"
+        f"Analyze this news headline: \"{headline}\"\n\n"
+        f"IMPORTANT RULES:\n"
+        f"1. 'keywords' MUST ALWAYS be 2-3 specific English nouns/proper nouns suitable for searching stock footage on Getty, Reuters, Envato, Pexels (e.g. 'Gaza protest crowd', 'Dhaka traffic rain', 'military tank strike').\n"
+        f"   EVEN IF THE HEADLINE IS IN BENGALI, TRANSLATE CORE CONCEPTS INTO CONCISE ENGLISH STOCK FOOTAGE KEYWORDS. NEVER output 'world event'.\n"
+        f"2. 'viral_score': integer 0-100:\n"
+        f"   - 90-100 = war, assassination, natural disaster, global emergency\n"
+        f"   - 70-89  = major political event, economic crisis, viral protest\n"
+        f"   - 50-69  = important national/international news\n"
+        f"   - 30-49  = routine updates, sports, culture\n"
+        f"   - 0-29   = minor local news\n"
+        f"3. 'importance_bn': exactly 1 sentence in Bengali explaining why it matters to the viewers.\n\n"
+        f"Respond ONLY as valid JSON (no markdown, no backticks, no explanation):\n"
+        f"{{\n"
+        f'  "keywords": "2-3 English nouns",\n'
+        f'  "viral_score": 75,\n'
+        f'  "importance_bn": "দর্শকের জন্য কেন গুরুত্বপূর্ণ"\n'
+        f"}}"
+    )
 
-def _fallback_keywords(headline: str) -> str:
-    words = [w for w in re.findall(r'[a-zA-Z]{3,}', headline) if w.lower() not in STOPWORDS]
-    return " ".join(words[:3]) if len(words) >= 2 else "world event"
+    generation_config = {
+        "response_mime_type": "application/json",
+        "temperature": 0.2
+    }
+
+    for model_name in CANDIDATE_MODELS:
+        try:
+            model = genai.GenerativeModel(model_name)
+            resp  = model.generate_content(prompt, generation_config=generation_config)
+            raw   = resp.text.strip()
+
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            data = json.loads(match.group(0)) if match else json.loads(raw)
+
+            keywords = data.get("keywords", "").strip()
+
+            clean_words = []
+            for w in re.findall(r'[a-zA-Z]+', keywords):
+                if w.lower() not in STOPWORDS and len(w) > 1:
+                    clean_words.append(w)
+
+            final_keywords = " ".join(clean_words[:3]) if clean_words else _fallback_keywords(headline)
+
+            return {
+                "keywords":      final_keywords,
+                "viral_score":   int(data.get("viral_score", 50)),
+                "importance_bn": data.get("importance_bn", "").strip() or default["importance_bn"],
+            }
+        except Exception as e:
+            err_str = str(e)
+            if "503" in err_str or "high demand" in err_str.lower() or "unavailable" in err_str.lower():
+                print(f"    ⚠️ Gemini {model_name} সাময়িক হাই ডিমান্ডে (503), পরবর্তী ব্যাকআপ মডেলে ট্রাই করা হচ্ছে...")
+                time.sleep(1)
+                continue
+            else:
+                print(f"    ⚠️ Gemini {model_name} রেসপন্স দেয়নি ({err_str[:60]})...")
+                continue
+
+    # সব মডেল ব্যর্থ হলেও কোনো ক্র্যাশ হবে না — স্মার্ট মাল্টিলিঙ্গুয়াল ডিকশনারি কাজ করবে
+    print("    💡 Gemini হাই ডিমান্ডে থাকায় স্মার্ট মাল্টিলিঙ্গুয়াল ফলব্যাক ইঞ্জিন দিয়ে ফুটেজ ট্যাগ তৈরি হয়েছে।")
+    return default
 
 # ══════════════════════════ টেলিগ্রাম মেসেজ ══════════════════════════════════
-def send_telegram(item: dict, analysis: dict) -> int | None:
+def send_telegram(item: dict, analysis: dict) -> tuple[int | None, int | None]:
+    """
+    টেলিগ্রামে প্রিভিউ ও টুলস বাটন মেসেজ পাঠায়।
+    দুটো মেসেজের আইডি-ই রিটার্ন করে যাতে ২৪ ঘণ্টা পর দুটিই অটো ডিলিট হতে পারে!
+    """
     title       = item["title"]
     link        = item["link"]
     source      = item["source"]
@@ -325,8 +426,8 @@ def send_telegram(item: dict, analysis: dict) -> int | None:
     viral_score = analysis["viral_score"]
     importance  = analysis.get("importance_bn", "")
 
-    clean_kw  = " ".join(keywords.split())
-    enc_kw    = urllib.parse.quote(clean_kw)
+    clean_kw   = " ".join(keywords.split())
+    enc_kw     = urllib.parse.quote(clean_kw)
     safe_title = escape_md(title)
 
     if viral_score >= 80:
@@ -342,9 +443,6 @@ def send_telegram(item: dict, analysis: dict) -> int | None:
     if "|" in sources_str:
         multi_badge = "\n✅ *একাধিক সোর্সে নিশ্চিত:* " + escape_md(sources_str)
 
-    # ══════════════════════════════════════════════════════════════════════
-    # FIX: ChatGPT script prompt — attached format টেমপ্লেট ব্যবহার করো
-    # ══════════════════════════════════════════════════════════════════════
     script_prompt = SCRIPT_FORMAT_TEMPLATE.format(headline=title)
     enc_script    = urllib.parse.quote(script_prompt)
 
@@ -413,61 +511,82 @@ def send_telegram(item: dict, analysis: dict) -> int | None:
 
     preview_msg_id = _send(text_preview)
     if not preview_msg_id:
-        return None
+        return (None, None)
 
     time.sleep(0.5)
-    _send("🔽 *স্ক্রিপ্ট ও ফুটেজ টুলস:*", reply_id=preview_msg_id, markup=keyboard)
+    tools_msg_id = _send("🔽 *স্ক্রিপ্ট ও ফুটেজ টুলস:*", reply_id=preview_msg_id, markup=keyboard)
 
-    return preview_msg_id
+    return (preview_msg_id, tools_msg_id)
 
-# ═══════════════════════ পুরোনো মেসেজ ডিলিট ══════════════════════════════════
+# ═══════════════════════ ২৪ ঘণ্টার পুরোনো মেসেজ অটো ডিলিট ════════════════════
 def cleanup_old_messages(data: dict) -> dict:
-    cutoff    = RETENTION_HOURS * 3600
+    """
+    ২৪ ঘণ্টার বেশি পুরোনো সমস্ত টেলিগ্রাম পোস্ট ও বাটন মেসেজ স্বয়ংক্রিয়ভাবে মুছে ফেলে।
+    """
+    cutoff    = RETENTION_HOURS * 3600  # 24 hours in seconds
+    now       = time.time()
     remaining = []
     deleted   = 0
-    for item in data.get("telegram_messages", []):
-        age = time.time() - item.get("timestamp", 0)
-        if age > cutoff:
-            msg_id = item.get("message_id")
-            if msg_id:
+
+    messages_list = data.get("telegram_messages", [])
+    if not messages_list:
+        return data
+
+    for item in messages_list:
+        age_sec = now - item.get("timestamp", 0)
+
+        # সাপোর্ট: নতুন 'message_ids' লিস্ট এবং পুরোনো 'message_id'
+        msg_ids = item.get("message_ids") or ([item.get("message_id")] if item.get("message_id") else [])
+
+        if age_sec >= cutoff:
+            for mid in msg_ids:
+                if not mid:
+                    continue
                 try:
                     res = requests.post(
                         f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage",
-                        json={"chat_id": CHAT_ID, "message_id": msg_id},
-                        timeout=5,
+                        json={"chat_id": CHAT_ID, "message_id": mid},
+                        timeout=7,
                     )
                     if res.status_code == 200:
                         deleted += 1
-                        print(f"    🗑️  Deleted 24h+ message (ID: {msg_id})")
+                        print(f"    🗑️ ২৪ ঘণ্টা পার — টেলিগ্রাম মেসেজ ডিলিট (ID: {mid})")
                     elif res.status_code == 400:
+                        # মেসেজ হয়তো আগেই ব্যবহারকারী ডিলিট করেছেন
                         deleted += 1
                 except Exception as e:
-                    print(f"    ⚠️ Delete error (ID: {msg_id}): {e}")
-                    remaining.append(item)
+                    print(f"    ⚠️ ডিলিট ব্যর্থ (ID: {mid}): {e}")
         else:
             remaining.append(item)
-    if deleted:
-        print(f"  🗑️  মোট {deleted}টি পুরোনো মেসেজ ডিলিট হয়েছে।")
+
+    if deleted > 0:
+        print(f"  🗑️ ২৪ ঘণ্টার পুরোনো মোট {deleted}টি মেসেজ টেলিগ্রাম চ্যানেল থেকে অটো-ডিলিট করা হয়েছে।")
+
     data["telegram_messages"] = remaining
     return data
 
 # ════════════════════════════════ মূল লজিক ════════════════════════════════════
 def process_news():
     data = load_data()
+
+    # ১. সাইকেলের শুরুতেই ২৪ ঘণ্টার পুরোনো মেসেজ ডিলিট চালানো
     data = cleanup_old_messages(data)
 
-    sent_fp_set      = {url_fingerprint(u)   for u in data.get("sent_links",         [])}
+    sent_fp_set      = {url_fingerprint(u) for u in data.get("sent_links", [])}
     sent_tfp_set     = set(data.get("title_fingerprints", []))
-    # FIX: content fingerprint set লোড করো
-    sent_cfp_set     = set(data.get("sent_content_fps",   []))
+    sent_cfp_set     = set(data.get("sent_content_fps", []))
     sent_titles      = data.get("sent_titles", [])
     sent_topics      = data.get("sent_topics", [])
 
     title_map: dict[str, list[dict]] = {}
 
+    # ২. সমস্ত ফিড থেকে লাইভ সংবাদ সংগ্রহ (User-Agent সহ যাতে কোনো ফিড ব্লক না হয়)
+    print("\n📡 সমস্ত আরএসএস সোর্স ক্রল করা হচ্ছে (প্রথম আলো, বিবিসি বাংলা, DW, সিএনএন, আল জাজিরা)...")
     for source, feed_url in RSS_FEEDS.items():
         try:
-            feed  = feedparser.parse(feed_url, agent="Mozilla/5.0")
+            # requests দিয়ে ফেচ করা নিশ্চিত করে রিয়েল ব্রাউজার হেডার
+            res = requests.get(feed_url, headers=REQUEST_HEADERS, timeout=12)
+            feed = feedparser.parse(res.content)
             taken = 0
             for entry in feed.entries:
                 if taken >= MAX_ENTRIES_PER_FEED:
@@ -478,13 +597,8 @@ def process_news():
                 if is_old_story(entry, norm_url):
                     continue
 
-                # ══════════════════════════════════════════════════════════
-                # FIX: Al Jazeera content fingerprint — feed পার্সের সময়ই চেক
-                # এটা URL ভিন্ন হলেও same story বাদ দেবে
-                # ══════════════════════════════════════════════════════════
                 cfp = content_fingerprint(entry.title)
                 if cfp in sent_cfp_set:
-                    print(f"  ⏭️  [Al Jazeera CFP dup] {entry.title[:55]}")
                     continue
 
                 article = {
@@ -510,8 +624,9 @@ def process_news():
                 else:
                     title_map[nt] = [article]
                 taken += 1
+            print(f"  ✓ {source}: {taken}টি সাম্প্রতিক সংবাদ পাওয়া গেছে")
         except Exception as e:
-            print(f"  ⚠️ Feed error ({source}): {e}")
+            print(f"  ⚠️ ফিড ত্রুটি ({source}): {e}")
 
     candidates = []
     for nt, group in title_map.items():
@@ -522,7 +637,7 @@ def process_news():
         best["base_score"]    = best["fresh_pts"] + (MULTI_SOURCE_BONUS if best["multi_source"] else 0)
         candidates.append(best)
 
-    print(f"\n📡 ইউনিক স্টোরি: {len(candidates)} টি\n{'─'*60}")
+    print(f"\n🔍 ফিল্টারিং ও ডুপ্লিকেট যাচাই: {len(candidates)} টি ক্যান্ডিডেট স্টোরি...")
 
     filtered = []
     dup_url = dup_title = dup_kw_pre = 0
@@ -544,16 +659,13 @@ def process_news():
         is_dup, score, _ = is_title_duplicate(title, sent_titles)
         if is_dup:
             dup_title += 1
-            print(f"  ⏭️  [Title {score}]  {title[:55]}")
             continue
 
         item["fp"]  = fp
         item["tfp"] = tfp
         filtered.append(item)
 
-    print(f"  ✂️  ডুপ্লিকেট বাদ → URL:{dup_url} টাইটেল:{dup_title}")
-    print(f"  📋 বাকি ক্যান্ডিডেট: {len(filtered)} টি\n{'─'*60}")
-
+    # Gemini দ্বারা ভাইরাল স্কোরিং ও কীওয়ার্ড অ্যানালাইসিস
     analyzed = []
     for item in filtered:
         analysis = get_gemini_analysis(item["title"])
@@ -561,7 +673,6 @@ def process_news():
         is_dup, score, _ = is_keyword_duplicate(analysis["keywords"], sent_topics)
         if is_dup:
             dup_kw_pre += 1
-            print(f"  ⏭️  [KW {score}] {item['title'][:50]}")
             continue
 
         total_score = item["base_score"] + analysis["viral_score"]
@@ -569,62 +680,128 @@ def process_news():
 
     analyzed.sort(key=lambda x: x[0], reverse=True)
 
-    print(f"  🎯 পোস্ট করার যোগ্য: {len(analyzed)} টি")
-    print(f"  📤 সর্বোচ্চ পোস্ট এই রানে: {MAX_POST_PER_RUN}")
+    # ══════════════════════════════════════════════════════════════════════════
+    # মাল্টি-সোর্স ফেয়ার ব্যালেন্সিং অ্যালগরিদম (Multi-Source Diversity Fair Share)
+    # যাতে একক কোনো সোর্স (যেমন শুধু আল জাজিরা) সব স্লট দখল না করে!
+    # প্রথম আলো, বিবিসি বাংলা, সিএনএন, DW এবং আল জাজিরা সবই সুযোগ পাবে।
+    # ══════════════════════════════════════════════════════════════════════════
+    source_buckets: dict[str, list] = {}
+    for score, item, analysis in analyzed:
+        src = item["source"]
+        source_buckets.setdefault(src, []).append((score, item, analysis))
+
+    selected_posts = []
+    source_counts = {s: 0 for s in source_buckets}
+
+    # ধাপ ১: প্রতিটি সক্রিয় সোর্স থেকে অন্তত ১টি করে সেরা খবর বাছাই
+    for src, items in source_buckets.items():
+        if items and len(selected_posts) < MAX_POST_PER_RUN:
+            selected_posts.append(items[0])
+            source_counts[src] += 1
+
+    # ধাপ ২: বাকি স্লটগুলো অন্যান্য হাই-স্কোরিং খবর দিয়ে পূরণ (সর্বোচ্চ MAX_POSTS_PER_SOURCE)
+    remaining_items = []
+    for src, items in source_buckets.items():
+        for itm in items[1:]:
+            remaining_items.append(itm)
+    remaining_items.sort(key=lambda x: x[0], reverse=True)
+
+    for score, item, analysis in remaining_items:
+        if len(selected_posts) >= MAX_POST_PER_RUN:
+            break
+        src = item["source"]
+        if source_counts.get(src, 0) < MAX_POSTS_PER_SOURCE:
+            selected_posts.append((score, item, analysis))
+            source_counts[src] = source_counts.get(src, 0) + 1
+
+    print(f"\n🎯 মাল্টি-সোর্স ব্যালেন্সড পোস্ট বাছাই: {len(selected_posts)} টি")
+    for s, c in source_counts.items():
+        if c > 0:
+            print(f"   • {s}: {c}টি সংবাদ")
     print(f"{'─'*60}")
 
     posted = 0
-    for total_score, item, analysis in analyzed:
-        if posted >= MAX_POST_PER_RUN:
-            break
-
+    for total_score, item, analysis in selected_posts:
         title = item["title"]
         link  = item["link"]
 
-        print(f"  ✅ [স্কোর:{total_score}] [{item['sources_str']}]")
-        print(f"     {title[:70]}")
-        print(f"     Tag: {analysis['keywords']} | {item['pub_time']}")
+        print(f"  🚀 সেন্ড করা হচ্ছে [{item['source']}] (স্কোর: {total_score})")
+        print(f"     {title[:65]}")
+        print(f"     ট্যাগ: {analysis['keywords']} | {item['pub_time']}")
 
-        msg_id = send_telegram(item, analysis)
+        preview_id, tools_id = send_telegram(item, analysis)
 
-        if msg_id:
+        if preview_id:
             data["sent_links"].append(link)
             data["sent_titles"].append(title)
             data["sent_topics"].append(analysis["keywords"])
             data["title_fingerprints"].append(item["tfp"])
-            # FIX: content fingerprint সেভ করো
             data["sent_content_fps"].append(item["cfp"])
 
             sent_fp_set.add(item["fp"])
             sent_tfp_set.add(item["tfp"])
-            sent_cfp_set.add(item["cfp"])   # in-memory আপডেট
+            sent_cfp_set.add(item["cfp"])
             sent_titles.append(title)
             sent_topics.append(analysis["keywords"])
+
+            # দুটি মেসেজের আইডি-ই সংরক্ষণ করুন যাতে ২৪ ঘণ্টা পর দুটিই ডিলিট হয়
+            msg_ids_to_track = [preview_id]
+            if tools_id:
+                msg_ids_to_track.append(tools_id)
+
             data["telegram_messages"].append({
-                "message_id": msg_id,
-                "timestamp":  time.time(),
+                "message_ids": msg_ids_to_track,
+                "timestamp":   time.time(),
+                "title":       title[:50],
+                "source":      item["source"],
             })
             posted += 1
             time.sleep(POST_DELAY_SEC)
 
     print(f"\n{'═'*60}")
-    print(
-        f"📊 রিপোর্ট → পোস্ট: {posted} | "
-        f"URL ডুপ: {dup_url} | টাইটেল ডুপ: {dup_title} | "
-        f"KW ডুপ: {dup_kw_pre}"
-    )
+    print(f"📊 সাইকেল রিপোর্ট → মোট টেলিগ্রাম পোস্ট: {posted} টি")
+    print(f"{'═'*60}")
     save_data(data)
 
-# ═══════════════════════════════ এন্ট্রি পয়েন্ট ════════════════════════════
+# ══════════════════════════ এক্সিকিউশন ও ১.৫ ঘণ্টা লুপ ═════════════════════════
 def main():
     if not BOT_TOKEN or not CHAT_ID:
-        print("❌ BOT_TOKEN বা CHAT_ID সেট করা নেই!")
+        print("❌ BOT_TOKEN বা CHAT_ID এনভায়রনমেন্ট ভেরিয়েবল সেট করা নেই!")
+        print("   টার্মিনালে সেট করুন: export BOT_TOKEN='...' ও export CHAT_ID='...'")
         return
+
     if not GEMINI_API_KEY:
-        print("⚠️ GEMINI_API_KEY নেই — fallback keyword ব্যবহার হবে।")
-    print(f"🚀 News Bot রান শুরু — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    process_news()
-    print("✅ রান শেষ।")
+        print("⚠️ GEMINI_API_KEY পাওয়া যায়নি — স্মার্ট অফলাইন ফলব্যাক ডিকশনারি সক্রিয় থাকবে।")
+
+    # যদি কমান্ড লাইনে --once দেয়া হয়, তবে শুধু ১ বার রান হবে
+    if "--once" in sys.argv:
+        print(f"\n🚀 এককালীন টেস্ট রান শুরু — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        process_news()
+        print("✅ টেস্ট রান সম্পন্ন।")
+        return
+
+    # নিয়মিত ১.৫ ঘণ্টা পর পর স্বয়ংক্রিয় ক্রল শিডিউলার
+    print("="*70)
+    print("🤖 বাংলা নিউজ টেলিগ্রাম বট — সক্রিয়")
+    print(f"⏰ ক্রল শিডিউল: প্রতি ১.৫ ঘণ্টা (৯০ মিনিট) পর পর স্বয়ংক্রিয়ভাবে চলবে")
+    print(f"🗑️ অটো ডিলিট: ২৪ ঘণ্টা পর পর পুরোনো টেলিগ্রাম মেসেজ অটো ডিলিট হবে")
+    print(f"📰 মাল্টি-সোর্স: প্রথম আলো, বিবিসি বাংলা, DW, সিএনএন, আল জাজিরা")
+    print(f"🎙️ স্ক্রিপ্ট: হিউম্যান-রিটেন পেশাদার ব্রডকাস্ট স্টাইল (নো স্পনসর)")
+    print("="*70)
+
+    cycle = 1
+    while True:
+        try:
+            print(f"\n⚡ [সাইকেল #{cycle}] ক্রল শুরু: {datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')}")
+            process_news()
+        except Exception as e:
+            print(f"❌ সাইকেল ত্রুটি: {e}")
+
+        cycle += 1
+        next_run = datetime.fromtimestamp(time.time() + CRAWL_INTERVAL_MINUTES * 60)
+        print(f"\n⏳ পরবর্তী ক্রল হবে ১.৫ ঘণ্টা (৯০ মিনিট) পর → {next_run.strftime('%I:%M %p')}")
+        print(f"💤 স্লিপিং {CRAWL_INTERVAL_MINUTES} মিনিট... (থামাতে Ctrl+C চাপুন)")
+        time.sleep(CRAWL_INTERVAL_MINUTES * 60)
 
 if __name__ == "__main__":
     main()
