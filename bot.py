@@ -9,7 +9,24 @@ import requests
 import urllib.parse
 from difflib import SequenceMatcher
 from datetime import datetime, timezone
-import google.generativeai as genai
+
+# ── Gemini SDK ইমপোর্ট (আধুনিক google-genai অফিসিয়াল প্যাকেজ + ব্যাকওয়ার্ড কম্প্যাটিবিলিটি) ──
+USE_MODERN_GENAI = False
+_CLIENT = None
+
+try:
+    from google import genai
+    from google.genai import types
+    USE_MODERN_GENAI = True
+except ImportError:
+    try:
+        import warnings
+        # পুরোনো প্যাকেজ থাকলে অপ্রয়োজনীয় FutureWarning লুকানো
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        import google.generativeai as legacy_genai
+        USE_MODERN_GENAI = False
+    except ImportError:
+        pass
 
 # ═══════════════════════════════ কনফিগারেশন ══════════════════════════════════
 BOT_TOKEN      = os.environ.get("BOT_TOKEN")
@@ -47,10 +64,17 @@ REQUEST_HEADERS = {
 
 # ── Gemini কনফিগ ────────────────────────────────────────────────────────────
 if GEMINI_API_KEY:
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-    except Exception as e:
-        print(f"⚠️ Gemini Config Error: {e}")
+    if USE_MODERN_GENAI:
+        try:
+            _CLIENT = genai.Client(api_key=GEMINI_API_KEY)
+        except Exception as e:
+            print(f"⚠️ Modern Google-GenAI init error: {e}")
+    else:
+        try:
+            legacy_genai.configure(api_key=GEMINI_API_KEY)
+            _CLIENT = legacy_genai
+        except Exception as e:
+            print(f"⚠️ Legacy Gemini Config Error: {e}")
 
 # ── মাল্টি-সোর্স আরএসএস ফিডস (বাংলা ও আন্তর্জাতিক সংবাদ সোর্স) ─────────────
 RSS_FEEDS = {
@@ -376,9 +400,23 @@ def get_gemini_analysis(headline: str) -> dict:
 
     for model_name in CANDIDATE_MODELS:
         try:
-            model = genai.GenerativeModel(model_name)
-            resp  = model.generate_content(prompt, generation_config=generation_config)
-            raw   = resp.text.strip()
+            raw = ""
+            if USE_MODERN_GENAI and _CLIENT:
+                resp = _CLIENT.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.2,
+                    ),
+                )
+                raw = resp.text.strip() if resp and resp.text else ""
+            elif _CLIENT:
+                model = _CLIENT.GenerativeModel(model_name)
+                resp  = model.generate_content(prompt, generation_config=generation_config)
+                raw   = resp.text.strip() if resp and resp.text else ""
+            else:
+                break
 
             match = re.search(r'\{.*\}', raw, re.DOTALL)
             data = json.loads(match.group(0)) if match else json.loads(raw)
@@ -773,11 +811,21 @@ def main():
     if not GEMINI_API_KEY:
         print("⚠️ GEMINI_API_KEY পাওয়া যায়নি — স্মার্ট অফলাইন ফলব্যাক ডিকশনারি সক্রিয় থাকবে।")
 
-    # যদি কমান্ড লাইনে --once দেয়া হয়, তবে শুধু ১ বার রান হবে
-    if "--once" in sys.argv:
-        print(f"\n🚀 এককালীন টেস্ট রান শুরু — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    # GitHub Actions বা CI রানার স্বয়ংক্রিয়ভাবে সনাক্তকরণ
+    # (GitHub Actions-এ workflow ক্রন শিডিউলে চলে, তাই ইনফিনিট লুপে রাখলে ৯০ মিনিট স্লিপে 'Operation was canceled' হয়ে যায়)
+    is_github_actions = os.environ.get("GITHUB_ACTIONS") == "true" or os.environ.get("CI") == "true"
+    run_once = "--once" in sys.argv or is_github_actions or os.environ.get("RUN_ONCE") == "true"
+
+    if run_once:
+        if is_github_actions:
+            print(f"\n🤖 [GitHub Actions রানার সনাক্ত হয়েছে]")
+            print(f"⚡ ১টি পূর্ণ সাইকেল ক্রল ও টেলিগ্রাম ব্রডকাস্ট শুরু — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"💡 GitHub Actions-এর ক্রন বা ডিসপ্যাচে ইনফিনিট স্লিপ এড়াতে ১ সাইকেল শেষেই এটি সফলভাবে Exit (0) করবে।")
+        else:
+            print(f"\n🚀 এককালীন টেস্ট রান শুরু — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
         process_news()
-        print("✅ টেস্ট রান সম্পন্ন।")
+        print("✅ সাইকেল সফলভাবে সম্পন্ন হয়েছে। এক্সিট কোড: 0")
         return
 
     # নিয়মিত ১.৫ ঘণ্টা পর পর স্বয়ংক্রিয় ক্রল শিডিউলার
